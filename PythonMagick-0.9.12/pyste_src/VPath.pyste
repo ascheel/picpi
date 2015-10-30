@@ -1,3 +1,0 @@
-obj=Class('Magick::VPath','/usr/include/Magick++/Drawable.h')
-declaration_code('#include <Magick++.h>')
-exclude(obj.operator['()'])
