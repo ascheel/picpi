@@ -4,6 +4,9 @@
 Requirements:
 Packages:
 python-pythonmagick
+python-devel (redhat)
+python-dev (debian)
+ImageMagick-devel (redhat)
 jhead
 sqlite3
 Dropbox Python SDK from https://www.dropbox.com/developers-v1/core/sdks/python
@@ -31,8 +34,8 @@ def main():
 
 	if len(sys.argv) > 1 and sys.argv[1] == 'config':
 		set_config()
-	if not os.path.isfile('/home/pi/.piepi.conf'):
-		print 'piepi does not appear to be configured.  Please run this first: ' + sys.argv[0] + ' config'
+	if not os.path.isfile('/home/pi/.picpi.conf'):
+		print 'picpi does not appear to be configured.  Please run this first: ' + sys.argv[0] + ' config'
 		sys.exit(0)
 
 	set_config()
@@ -42,7 +45,7 @@ def main():
 	db = getSQLite3()
 
 	# Do our directories exist?
-	dirList = ('piepiDir','storagePath','inboundFilePath','tmpPath',)
+	dirList = ('picpiDir','storagePath','inboundFilePath','tmpPath',)
 	for dir in dirList:
 		if not os.path.isdir(gets(dir)):
 			os.mkdir(gets(dir))
@@ -68,32 +71,33 @@ def gets(setting):
 
 def getc():
 	c = ConfigParser.ConfigParser()
-	configFile = os.path.expanduser('~') + '/.piepi.conf'
+	configFile = os.path.expanduser('~') + '/.picpi.conf'
 	c.read(configFile)
 	return c
 
 def set_config():
 	c = getc()
-	configFile = os.path.expanduser('~') + '/.piepi.conf'
+	configFile = os.path.expanduser('~') + '/.picpi.conf'
 	if os.path.isfile(configFile) and len(sys.argv) > 1 and sys.argv[1] == 'config':
 		print "Config file already exists: " + configFile
-		print "If you really want to reconfigure piepi, please delete the config."
+		print "If you really want to reconfigure picpi, please delete the config."
 	if 'Main' not in c.sections():
 		c.add_section('Main')
-		c.set('Main','piepiDir','/home/pi/piepi')
-		c.set('Main','storagePath','/home/pi/piepi/storage')
-		c.set('Main','inboundFilePath','/home/pi/piepi/inbound')
-		c.set('Main','tmpPath','/home/pi/piepi/tmp')
+		baseDir = os.getcwd()
+		c.set('Main','picpiDir',baseDir + '/picpi')
+		c.set('Main','storagePath',baseDir + '/picpi/storage')
+		c.set('Main','inboundFilePath',baseDir + '/picpi/inbound')
+		c.set('Main','tmpPath',baseDir + '/picpi/tmp')
 		c.set('Main','picExts',','.join(('jpg','jpeg','tif','tiff','gif','png','bmp')))
 		c.set('Main','vidExts',','.join(('wmv','mpg2','mpg4','mpg','mkv')))
 		c.set('Main','pictureDuration',5)
 		c.set('Main','debug',0)
 		c.set('Main','dropbox_access_token','')
-		c.set('Main','dropbox_base_dir','/Media/piepi')
+		c.set('Main','dropbox_base_dir','/Media/picpi')
 		cfg = open(configFile,'w')
 		c.write(cfg)
 		cfg.close()
-		print "piepi configured with default settings."
+		print "picpi configured with default settings."
 		print "If customization is needed, please edit " + configFile
 		sys.exit(0)
 	return
@@ -104,7 +108,7 @@ def stamp():
 
 def getSQLite3():
 	# Opens the DB, creates if it does not exist.
-	dbName = gets('piepiDir') + '/file_list.db'
+	dbName = gets('picpiDir') + '/file_list.db'
 	db = sqlite3.connect(dbName)
 	cur = db.cursor()
 
@@ -417,7 +421,7 @@ def getImgCenterCoords(img):
 
 def logIt(debugLevel,msg):
 	if debugLevel <= int(gets('debug')):
-		f = open('/home/pi/sda1/piepi/log.txt','aw')
+		f = open('/home/pi/sda1/picpi/log.txt','aw')
 		f.write(msg + '\n')
 	return
 
