@@ -91,6 +91,8 @@ def set_config():
 		c.set('Main','picExts',','.join(('jpg','jpeg','tif','tiff','gif','png','bmp')))
 		c.set('Main','vidExts',','.join(('wmv','mpg2','mpg4','mpg','mkv')))
 		c.set('Main','pictureDuration',5)
+		c.set('Main','resize_width',1920)
+		c.set('Main','resize_height',1080)
 		c.set('Main','debug',0)
 		c.set('Main','dropbox_access_token','')
 		c.set('Main','dropbox_base_dir','/Media/picpi')
@@ -433,9 +435,7 @@ def getNewSize(fileName):
 	ratioWidth = screenResolution[0] / imageSize[0]
 	ratioHeight = screenResolution[1] / imageSize[1]
 
-	useRatio = screenResolution[0] / imageSize[0]
-	if screenResolution[1] / imageSize[1] < screenResolution[0] / imageSize[0]:
-		useRatio = screenResolution[1] / imageSize[1]
+	useRatio = (screenResolution[0] / imageSize[0], screenResolution[1] / imageSize[1])
 
 	width = int(math.floor(imageSize[0] * useRatio))
 	height = int(math.floor(imageSize[1] * useRatio))
