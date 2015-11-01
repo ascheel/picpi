@@ -3,13 +3,9 @@
 """
 Requirements:
 Packages:
-python-pythonmagick
-python-devel (redhat)
-python-dev (debian)
-ImageMagick-devel (redhat)
 jhead
 sqlite3
-Dropbox Python SDK from https://www.dropbox.com/developers-v1/core/sdks/python
+python-arrow
 """
 from __future__ import division
 
@@ -20,12 +16,12 @@ import time
 import os
 import subprocess
 import shutil
-import PythonMagick as PM
 import random
 import pygame
 import math
 import ConfigParser
 import dropbox
+import arrow
 from PIL import Image
 
 def main():
@@ -34,8 +30,12 @@ def main():
 
 	if len(sys.argv) > 1 and sys.argv[1] == 'config':
 		set_config()
+	if len(sys.argv) > 1 and sys.argv[1] == 'wipe':
+		wipeAll()
+		log('Wiped.')
+		sys.exit(0)
 	if not os.path.isfile('/home/pi/.picpi.conf'):
-		print 'picpi does not appear to be configured.  Please run this first: ' + sys.argv[0] + ' config'
+		log('picpi does not appear to be configured.  Please run this first: ' + sys.argv[0] + ' config')
 		sys.exit(0)
 
 	set_config()
@@ -79,8 +79,8 @@ def set_config():
 	c = getc()
 	configFile = os.path.expanduser('~') + '/.picpi.conf'
 	if os.path.isfile(configFile) and len(sys.argv) > 1 and sys.argv[1] == 'config':
-		print "Config file already exists: " + configFile
-		print "If you really want to reconfigure picpi, please delete the config."
+		log("Config file already exists: " + configFile)
+		log("If you really want to reconfigure picpi, please delete the config.")
 	if 'Main' not in c.sections():
 		c.add_section('Main')
 		baseDir = os.getcwd()
@@ -92,15 +92,15 @@ def set_config():
 		c.set('Main','vidExts',','.join(('wmv','mpg2','mpg4','mpg','mkv')))
 		c.set('Main','pictureDuration',5)
 		c.set('Main','resize_width',1920)
-		c.set('Main','resize_height',1080)
+		c.set('Main','resize_height',1920)	# Same as width in case someone wants to go vertical with a monitor
 		c.set('Main','debug',0)
 		c.set('Main','dropbox_access_token','')
 		c.set('Main','dropbox_base_dir','/Media/picpi')
 		cfg = open(configFile,'w')
 		c.write(cfg)
 		cfg.close()
-		print "picpi configured with default settings."
-		print "If customization is needed, please edit " + configFile
+		log("picpi configured with default settings.")
+		log("If customization is needed, please edit " + configFile)
 		sys.exit(0)
 	return
 
@@ -115,7 +115,7 @@ def getSQLite3():
 	cur = db.cursor()
 
 	tableName = 'files'
-	column_text = 'path TEXT UNIQUE, rev TEXT, bytes INTEGER, sha1hash TEXT UNIQUE, date_synced REAL, modified TEXT'
+	column_text = 'path TEXT UNIQUE, rev TEXT, bytes INTEGER, date_synced REAL, modified TEXT'
 	cur.execute('CREATE TABLE IF NOT EXISTS {} ({})'.format(tableName, column_text))
 
 	tableName = 'directories'
@@ -130,7 +130,7 @@ def getResolution():
 	screenResolution = subprocess.check_output("fbset -s | grep '^mode' | sed 's/\"//g' | awk '{ print $2 }'", shell=True).rstrip().split('x')
 	screenResolution = (int(screenResolution[0]),int(screenResolution[1]))
 	#screenResolution = (1920,1080)	#assume 1080p
-	print stamp() + " - Found resolution: " + repr(screenResolution)
+	log("Found resolution: " + repr(screenResolution))
 	return screenResolution
 
 def isAnimatedGif(fileName):
@@ -144,17 +144,19 @@ def isAnimatedGif(fileName):
 	return animated
 
 def resizeImage(currentFile,newFName):
-	if int(gets('debug')):
-		print ""
-		print stamp() + " - Resizing " + currentFile
-	image = PM.Image(currentFile)
-	image.resize(str(screenResolution[0]) + 'x' + str(screenResolution[1]))
-	image.write(newFName)
+	log("Resizing " + currentFile)
+	image = Image.open(currentFile)
+	log('Current size: ' + repr(image.size))
+	log('resize_width: ' + gets('resize_width'))
+	log('resize_height: ' + gets('resize_height'))
+	image.thumbnail((gets('resize_width'),gets('resize_height')), Image.ANTIALIAS)
+	log('New size: ' + repr(image.size))
+	image.save(newFName)
 	return
 
 def rotateImage(newFName):
 	if int(gets('debug')):
-		print stamp() + " - Rotating " + newFName
+		log("Rotating " + newFName)
 	subprocess.call('jhead -autorot -q \"{}\" >/dev/null 2>&1'.format(newFName), shell=True)
 	return
 
@@ -168,78 +170,46 @@ def incrementFile(filename):
 	return newName
 
 def processFile(db, currentFile):
-	global fileCount
 	fileName, fileExt = os.path.splitext(currentFile)
 	filePath, fileBase = os.path.split(fileName)
 	tmpName = gets('tmpPath') + "/" + fileBase + fileExt
 	newFName = gets('storagePath') + "/" + fileBase + fileExt
 
-	if (not hashExistsInDB(db, currentFile) and
-		not fileExistsInDB(db,currentFile) and
-		getHashFromFile(currentFile) != getHashFromDestination(db, newFName)
-		):
-		print stamp() + " - Processing " + currentFile,
-		if os.path.isfile(newFName):
-			newFName = incrementFile(newFName)
-		ext = fileExt[1:].lower()
-	
-		processIt = True
-		if ext not in gets('picExts').lower().split(','):
-			processIt = False
-		if ext == 'gif':
-			if isAnimatedGif(currentFile):
-				#We're only resizing and rotating if it's not animated.
-				#If it's animated, someone should have already oriented and resized it properly
-				displayPic = False
+	log("Processing " + currentFile,)
+	if os.path.isfile(newFName):
+		newFName = incrementFile(newFName)
+	ext = fileExt[1:].lower()
 
-		if processIt:
-			resizeImage(currentFile, tmpName)
-			rotateImage(tmpName)
-		else:
-			print " - Skipped."
-			return
-		shutil.move(tmpName,newFName)
-		fileCount += 1
-		print stamp() + ' - File count: ' + str(fileCount)
-	else:
-		print stamp() + " - Skipping: " + currentFile
-		if int(gets('debug')):
-			print stamp() + " - File exists in database: " + newFName
+	processIt = True
+	if ext not in gets('picExts').lower().split(','):
+		processIt = False
+	if ext == 'gif':
+		if isAnimatedGif(currentFile):
+			#We're only resizing and rotating if it's not animated.
+			#If it's animated, someone should have already oriented and resized it properly
+			ProcessIt = False
 
-	# Add hash to db
-	status = addHash(db, currentFile, newFName)
-	if int(gets('debug')):
-		if status == 0:
-			print stamp() + " - Success: {}".format(currentFile)
-		elif status == 1:
-			# We shouldn't actually be able to hit this.
-			print stamp() + " - File does not exist: {}".format(currentFile)
-		elif status == 2:
-			print stamp() + " - Hash already exists for {}".format(currentFile)
-		else:
-			print stamp() + " - Unknown error has occurred."
+	if processIt:
+		resizeImage(currentFile, tmpName)
+		rotateImage(tmpName)
+	shutil.move(tmpName,newFName)
+
 	return
 
 def getPathFromDB(path):
 	cur = db.cursor()
 	cur.execute('SELECT hash FROM directories WHERE path = ?', (path,))
 	results = cur.fetchall()[0][0]
-	if not fileCount:
-		return False
-	else:
-		return True
 	return
-
-	return False
 
 def dropboxWalk(client, path, fileList=[], dirList=[]):
 	data = client.metadata(path)
 	if data['is_dir']:
 		dirList.append(data['path'])
 		relativePath = getRelative(data['path'])
-		newPath = gets('storagePath') + '/' + relativePath
+		newPath = gets('inboundFilePath') + '/' + relativePath
 		if not os.path.exists(newPath):
-			print 'Creating directory: ' + newPath
+			log('Creating directory: ' + newPath)
 			os.mkdir(newPath)
 		for entry in data['contents']:
 			dropboxWalk(client, entry['path'], fileList, dirList)
@@ -250,11 +220,11 @@ def dropboxWalk(client, path, fileList=[], dirList=[]):
 
 def getDropboxFile(client, path):
 	for file in os.listdir(gets('tmppath')):
-		os.remove(file)
-	newFile = gets('storagePath') + '/' + getRelative(path)
+		os.remove(gets('tmppath') + '/' + file)
+	newFile = gets('inboundFilePath') + '/' + getRelative(path)
 	# Need to check revision against stored revision.
 	if not os.path.exists(newFile):
-		print "Downloading: " + getRelative(path),
+		log("Downloading: " + getRelative(path), 1)
 		f, metadata = client.get_file_and_metadata(path)
 		outFile = gets('tmpPath') + '/' + os.path.split(path)[1]
 		save = open(outFile, 'w')
@@ -262,21 +232,44 @@ def getDropboxFile(client, path):
 		save.write(f.read())
 		duration = int(round(time.time() * 1000)) - startTime
 		save.close()
-		#print metadata
 		shutil.move(outFile, newFile)
 		fileSize = os.path.getsize(newFile)
 		bps = fileSize / duration
-		print "- Speed: " + str(round(fileSize / duration / 1024,2)) + ' MB/s'
+
+		# Set modified time to that on Dropbox.  Don't use 'modified'.
+		newTime = arrow.get(metadata['client_mtime'].replace('+0000',''),'ddd, D MMM YYYY HH:mm:ss').to('local').timestamp
+		os.utime(newFile,(newTime,newTime))
+
+		log("- Speed: " + str(round(bps / 1024,2)) + ' MB/s',2)
+
+		processFile(db, newFile)
+		storeFile(path, metadata)
 	return
 
-def storeRevision(path):
+def wipeAll():
+	dbFile = gets('picpidir') + '/' + 'file_list.db'
+	if os.path.exists(dbFile):
+		if not os.remove(dbFile):
+			log("DB file deleted: " + dbFile)
+		else:
+			log("Unable to delete DB file: " + dbFile)
+	for dir in ('inboundFilePath', 'storagePath', 'tmpPath',):
+		if os.path.isdir(gets(dir)):
+			shutil.rmtree(gets(dir),ignore_errors=True)
+			log("Directory deleted: " + gets(dir))
+	return
+
+def storeFile(path, metadata):
 	cur = db.cursor()
-	cur.execute('INSERT INTO files VALUES (?, ?, ?, ?, ?, ?)', (path,))
-	results = cur.fetchall()[0][0]
-	if not fileCount:
-		return False
-	else:
-		return True
+	cur.execute('INSERT INTO files VALUES (?, ?, ?, ?, ?)', (path, metadata['revision'], metadata['bytes'], stamp(), metadata['client_mtime'].replace('+0000','')))
+	db.commit()
+	return
+
+def storeDir(path, metadata):
+	cur = db.cursor()
+	cur.execute('INSERT INTO directories VALUES (?, ?, ?)', (path, metadata['hash'], stamp()))
+	db.commit()
+	return
 
 def getRelative(path):
 	oldPath = path.split('/')
@@ -289,24 +282,27 @@ def getRelative(path):
 		relativePath = '/'.join(oldPath)
 	return relativePath
 
-def getNewFiles(db):
+def getNewFiles():
+	global db
 	times['sync'] = time.time()
-	print stamp() + " - Syncing from mothership."
-
+	log("Syncing from mothership.")
+	
 	# Get Dropbox contents
 	client = dropbox.client.DropboxClient(gets('dropbox_access_token'))
 	baseDir = gets('dropbox_base_dir')
 	if not client.metadata(baseDir)['is_dir']:
-		print 'base Dropbox path is not a directory.'
+		log('base Dropbox path is not a directory.')
 		sys.exit(1)
 	fileList, dirList = dropboxWalk(client, baseDir)
-	print stamp() + " - Syncing complete."
+	log("Syncing complete.")
 
+	"""
 	times['processing'] = time.time()
 	for root, dir, files in os.walk(gets('inboundFilePath')):
 		for fname in files:
 			currentFile = root + "/" + fname
 			#processFile(db, currentFile)
+	"""
 	return
 
 def runSlideShow():
@@ -343,12 +339,12 @@ def runSlideShow():
 				checkEvents()
 		firstIteration = False
 		if os.listdir(gets('storagePath')) == []:
-			print stamp() + " - No files in " + gets('StoragePath')
+			log("No files in " + gets('StoragePath'))
 			waitPage('nofiles')
 		else:
 			fileName = gets('storagePath') + "/" + random.choice(os.listdir(gets('storagePath')))
 			if os.path.splitext(fileName)[1].lower()[1:] not in gets('picExts').split(','):
-				print stamp() + " - skipping " + fileName + ". Not a picture."
+				log("skipping " + fileName + ". Not a picture.")
 				continue
 
 			# Get the size appropriate for the new pictures for resizing
@@ -430,24 +426,45 @@ def logIt(debugLevel,msg):
 def getImgSize(fileName):
 	return Image.open(fileName).size
 
-def getNewSize(fileName):
+def getNewSize(fileName, newWidth=gets('resize_width'), newHeight=gets('resize_height')):
 	imageSize = getImgSize(fileName)
-	ratioWidth = screenResolution[0] / imageSize[0]
-	ratioHeight = screenResolution[1] / imageSize[1]
+	if newWidth:
+		useWidth = newWidth
+	else:
+		useWidth = screenResolution[0]
+	if newHeight:
+		useHeight = newHeight
+	else:
+		useHeight = screenResolution[1]
+	
+	ratioWidth = useWidth / imageSize[0]
+	ratioHeight = useHeight / imageSize[1]
 
-	useRatio = (screenResolution[0] / imageSize[0], screenResolution[1] / imageSize[1])
+	useRatio = min(useWidth / imageSize[0], useHeight / imageSize[1])
 
 	width = int(math.floor(imageSize[0] * useRatio))
 	height = int(math.floor(imageSize[1] * useRatio))
 
 	return (width, height)
 
+def log(msg, mode=0):
+	newMsg = stamp() + ' - ' + msg
+	if mode == 1:
+		print newMsg,
+	elif mode == 2:
+		print msg
+	elif mode == 3:
+		print msg,
+	else:
+		print newMsg
+	return
+
 def refreshFiles():
 	times['refresh'] = time.time()
 	resolution = ""
 
-	print stamp() + " - Checking for new files."
-	getNewFiles(db)
+	log("Checking for new files.")
+	getNewFiles()
 
 	return
 
