@@ -115,7 +115,7 @@ def getSQLite3():
 	cur = db.cursor()
 
 	tableName = 'files'
-	column_text = 'path TEXT UNIQUE, rev TEXT, bytes INTEGER, date_synced REAL, modified TEXT'
+	column_text = 'path TEXT UNIQUE, rev TEXT, bytes INTEGER, date_synced REAL, modified TEXT, local_path TEXT'
 	cur.execute('CREATE TABLE IF NOT EXISTS {} ({})'.format(tableName, column_text))
 
 	tableName = 'directories'
@@ -144,13 +144,10 @@ def isAnimatedGif(fileName):
 	return animated
 
 def resizeImage(currentFile,newFName):
-	log("Resizing " + currentFile)
+	if int(gets('debug')):
+		log("Resizing " + currentFile)
 	image = Image.open(currentFile)
-	log('Current size: ' + repr(image.size))
-	log('resize_width: ' + gets('resize_width'))
-	log('resize_height: ' + gets('resize_height'))
-	image.thumbnail((gets('resize_width'),gets('resize_height')), Image.ANTIALIAS)
-	log('New size: ' + repr(image.size))
+	image.thumbnail((int(gets('resize_width')),int(gets('resize_height'))), Image.ANTIALIAS)
 	image.save(newFName)
 	return
 
@@ -169,11 +166,16 @@ def incrementFile(filename):
 		newName = '{}_{}{}'.format(fileRoot, suffixNum, fileExt)
 	return newName
 
-def processFile(db, currentFile):
-	fileName, fileExt = os.path.splitext(currentFile)
-	filePath, fileBase = os.path.split(fileName)
-	tmpName = gets('tmpPath') + "/" + fileBase + fileExt
-	newFName = gets('storagePath') + "/" + fileBase + fileExt
+def processFile(db, currentFile, newFName):
+	fileExt = os.path.splitext(currentFile)[1]
+	fileBase = os.path.split(currentFile)[1]
+	tmpName = gets('tmpPath') + "/" + fileBase
+	
+	newPath = gets('storagePath') + "/" + getRelative(os.path.split(currentFile)[0], gets('inboundFilePath'))
+	newFName = newPath + "/" + fileBase
+	if not os.path.isdir(newPath):
+		log('Creating directory: ' + newPath)
+		os.mkdir(newPath)
 
 	log("Processing " + currentFile,)
 	if os.path.isfile(newFName):
@@ -190,8 +192,8 @@ def processFile(db, currentFile):
 			ProcessIt = False
 
 	if processIt:
-		resizeImage(currentFile, tmpName)
 		rotateImage(tmpName)
+		resizeImage(currentFile, tmpName)
 	shutil.move(tmpName,newFName)
 
 	return
@@ -206,7 +208,7 @@ def dropboxWalk(client, path, fileList=[], dirList=[]):
 	data = client.metadata(path)
 	if data['is_dir']:
 		dirList.append(data['path'])
-		relativePath = getRelative(data['path'])
+		relativePath = getRelative(data['path'],gets('dropbox_base_dir'))
 		newPath = gets('inboundFilePath') + '/' + relativePath
 		if not os.path.exists(newPath):
 			log('Creating directory: ' + newPath)
@@ -221,10 +223,10 @@ def dropboxWalk(client, path, fileList=[], dirList=[]):
 def getDropboxFile(client, path):
 	for file in os.listdir(gets('tmppath')):
 		os.remove(gets('tmppath') + '/' + file)
-	newFile = gets('inboundFilePath') + '/' + getRelative(path)
+	newFile = gets('inboundFilePath') + '/' + getRelative(path, gets('dropbox_base_dir'))
 	# Need to check revision against stored revision.
 	if not os.path.exists(newFile):
-		log("Downloading: " + getRelative(path), 1)
+		log("Downloading: " + getRelative(path, gets('dropbox_base_dir')), 1)
 		f, metadata = client.get_file_and_metadata(path)
 		outFile = gets('tmpPath') + '/' + os.path.split(path)[1]
 		save = open(outFile, 'w')
@@ -242,8 +244,9 @@ def getDropboxFile(client, path):
 
 		log("- Speed: " + str(round(bps / 1024,2)) + ' MB/s',2)
 
-		processFile(db, newFile)
-		storeFile(path, metadata)
+		storageName = gets('storagePath') + '/' + getRelative(newFile, gets('inboundFilePath'))
+		processFile(db, newFile, storageName)
+		storeFile(path, metadata, storageName)
 	return
 
 def wipeAll():
@@ -259,9 +262,9 @@ def wipeAll():
 			log("Directory deleted: " + gets(dir))
 	return
 
-def storeFile(path, metadata):
+def storeFile(path, metadata, newPath):
 	cur = db.cursor()
-	cur.execute('INSERT INTO files VALUES (?, ?, ?, ?, ?)', (path, metadata['revision'], metadata['bytes'], stamp(), metadata['client_mtime'].replace('+0000','')))
+	cur.execute('INSERT INTO files VALUES (?, ?, ?, ?, ?, ?)', (path, metadata['revision'], metadata['bytes'], stamp(), metadata['client_mtime'].replace('+0000',''), newPath))
 	db.commit()
 	return
 
@@ -271,13 +274,13 @@ def storeDir(path, metadata):
 	db.commit()
 	return
 
-def getRelative(path):
+def getRelative(path,base):
 	oldPath = path.split('/')
-	dropbox_base_dir = gets('dropbox_base_dir').split('/')
+	base_dir = base.split('/')
 	try:
-		while dropbox_base_dir[0].lower() == oldPath[0].lower():
+		while base_dir[0].lower() == oldPath[0].lower():
 			del oldPath[0]
-			del dropbox_base_dir[0]
+			del base_dir[0]
 	except IndexError:
 		relativePath = '/'.join(oldPath)
 	return relativePath
@@ -342,7 +345,7 @@ def runSlideShow():
 			log("No files in " + gets('StoragePath'))
 			waitPage('nofiles')
 		else:
-			fileName = gets('storagePath') + "/" + random.choice(os.listdir(gets('storagePath')))
+			fileName = getFilenameFromDB()
 			if os.path.splitext(fileName)[1].lower()[1:] not in gets('picExts').split(','):
 				log("skipping " + fileName + ". Not a picture.")
 				continue
@@ -366,6 +369,16 @@ def runSlideShow():
 			# But nothing shows up until we update.
 			pygame.display.update()
 	return
+
+def getFilenameFromDB():
+	cur = db.cursor()
+	cur.execute('SELECT local_path FROM files ORDER BY RANDOM() LIMIT 1')
+	results = cur.fetchall()
+	if not results:
+		fileName = ""
+	else:
+		fileName = results[0][0]
+	return fileName
 
 def waitPage(status):
 	if status == 'nofiles':
@@ -426,7 +439,7 @@ def logIt(debugLevel,msg):
 def getImgSize(fileName):
 	return Image.open(fileName).size
 
-def getNewSize(fileName, newWidth=gets('resize_width'), newHeight=gets('resize_height')):
+def getNewSize(fileName, newWidth=int(gets('resize_width')), newHeight=int(gets('resize_height'))):
 	imageSize = getImgSize(fileName)
 	if newWidth:
 		useWidth = newWidth
