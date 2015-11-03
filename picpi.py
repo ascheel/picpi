@@ -6,8 +6,10 @@ Packages:
 jhead
 sqlite3
 python-arrow
+python-pyexiv2
 """
 from __future__ import division
+from __future__ import print_function
 
 import hashlib
 import sqlite3
@@ -16,17 +18,20 @@ import time
 import os
 import subprocess
 import shutil
-import random
+#import random
 import pygame
 import math
 import ConfigParser
 import dropbox
 import arrow
+import pyexiv2
 from PIL import Image
 
 def main():
 	global db
 	global times
+	global slideshowMode
+	slideshowMode = False
 
 	if len(sys.argv) > 1 and sys.argv[1] == 'config':
 		set_config()
@@ -55,6 +60,7 @@ def main():
 	if len(sys.argv) > 1 and sys.argv[1] == 'refresh':
 		refreshFiles()
 	else:
+		slideshowMode = True
 		runSlideShow()
 
 	times['Complete'] = time.time()
@@ -115,7 +121,7 @@ def getSQLite3():
 	cur = db.cursor()
 
 	tableName = 'files'
-	column_text = 'path TEXT UNIQUE, rev TEXT, bytes INTEGER, date_synced REAL, modified TEXT, local_path TEXT'
+	column_text = 'path TEXT UNIQUE, revision INTEGER, bytes INTEGER, date_synced REAL, modified TEXT, local_path TEXT, blacklisted INTEGER'
 	cur.execute('CREATE TABLE IF NOT EXISTS {} ({})'.format(tableName, column_text))
 
 	tableName = 'directories'
@@ -126,11 +132,18 @@ def getSQLite3():
 	return db
 
 def getResolution():
+	log('in getResolution()',3)
 	#global screenResolution
-	screenResolution = subprocess.check_output("fbset -s | grep '^mode' | sed 's/\"//g' | awk '{ print $2 }'", shell=True).rstrip().split('x')
+	log('Running fbset to get resolution.',2)
+	screenResolution = subprocess.check_output("fbset -s | grep '^mode' | sed 's/\"//g' | awk '{ print $2 }'", shell=True).rstrip()
+	minusPos = screenResolution.find('-')
+	if minusPos >= 0:
+		screenResolution = screenResolution[0:minusPos].split('x')
+	log('Returned from fbset.',3)
+	log('screenResolution: ' + repr(screenResolution),2)
 	screenResolution = (int(screenResolution[0]),int(screenResolution[1]))
 	#screenResolution = (1920,1080)	#assume 1080p
-	log("Found resolution: " + repr(screenResolution))
+	log("Found resolution: " + repr(screenResolution),2)
 	return screenResolution
 
 def isAnimatedGif(fileName):
@@ -144,16 +157,17 @@ def isAnimatedGif(fileName):
 	return animated
 
 def resizeImage(currentFile,newFName):
-	if int(gets('debug')):
-		log("Resizing " + currentFile)
+	log("Resizing:    " + currentFile,2)
 	image = Image.open(currentFile)
 	image.thumbnail((int(gets('resize_width')),int(gets('resize_height'))), Image.ANTIALIAS)
 	image.save(newFName)
-	return
 
+	#Copy exif data
+	copyExif(currentFile,newFName)
+	return
+ 
 def rotateImage(newFName):
-	if int(gets('debug')):
-		log("Rotating " + newFName)
+	log("Rotating:    " + newFName,2)
 	subprocess.call('jhead -autorot -q \"{}\" >/dev/null 2>&1'.format(newFName), shell=True)
 	return
 
@@ -174,10 +188,10 @@ def processFile(db, currentFile, newFName):
 	newPath = gets('storagePath') + "/" + getRelative(os.path.split(currentFile)[0], gets('inboundFilePath'))
 	newFName = newPath + "/" + fileBase
 	if not os.path.isdir(newPath):
-		log('Creating directory: ' + newPath)
+		log('Creating directory: ' + newPath,1)
 		os.mkdir(newPath)
 
-	log("Processing " + currentFile,)
+	log("Processing:  " + currentFile,1)
 	if os.path.isfile(newFName):
 		newFName = incrementFile(newFName)
 	ext = fileExt[1:].lower()
@@ -192,17 +206,20 @@ def processFile(db, currentFile, newFName):
 			ProcessIt = False
 
 	if processIt:
-		rotateImage(tmpName)
 		resizeImage(currentFile, tmpName)
+		rotateImage(tmpName)
 	shutil.move(tmpName,newFName)
 
 	return
 
-def getPathFromDB(path):
+def getHashFromDB(path):
 	cur = db.cursor()
 	cur.execute('SELECT hash FROM directories WHERE path = ?', (path,))
-	results = cur.fetchall()[0][0]
-	return
+	results = cur.fetchall()
+	if not results:
+		return None
+	else:
+		return results
 
 def dropboxWalk(client, path, fileList=[], dirList=[]):
 	data = client.metadata(path)
@@ -213,6 +230,7 @@ def dropboxWalk(client, path, fileList=[], dirList=[]):
 		if not os.path.exists(newPath):
 			log('Creating directory: ' + newPath)
 			os.mkdir(newPath)
+			storeDir(path, data)
 		for entry in data['contents']:
 			dropboxWalk(client, entry['path'], fileList, dirList)
 	else:
@@ -224,11 +242,14 @@ def getDropboxFile(client, path):
 	for file in os.listdir(gets('tmppath')):
 		os.remove(gets('tmppath') + '/' + file)
 	newFile = gets('inboundFilePath') + '/' + getRelative(path, gets('dropbox_base_dir'))
-	# Need to check revision against stored revision.
-	if not os.path.exists(newFile):
-		log("Downloading: " + getRelative(path, gets('dropbox_base_dir')), 1)
-		f, metadata = client.get_file_and_metadata(path)
+	metadata = client.metadata(path)
+
+	log('Database revision: ' + str(metadata['revision']) + ' - ' + str(getRevision(path)) + ' :Dropbox revision',2)
+	if not os.path.exists(newFile) or metadata['revision'] != getRevision(path):
+		log('In process if.',3)
+		log("Downloading: " + getRelative(path, gets('dropbox_base_dir')))
 		outFile = gets('tmpPath') + '/' + os.path.split(path)[1]
+		f = client.get_file(path)
 		save = open(outFile, 'w')
 		startTime = int(round(time.time() * 1000))
 		save.write(f.read())
@@ -242,12 +263,23 @@ def getDropboxFile(client, path):
 		newTime = arrow.get(metadata['client_mtime'].replace('+0000',''),'ddd, D MMM YYYY HH:mm:ss').to('local').timestamp
 		os.utime(newFile,(newTime,newTime))
 
-		log("- Speed: " + str(round(bps / 1024,2)) + ' MB/s',2)
+		log(" - Speed: " + str(round(bps / 1024,2)) + ' MB/s',2)
 
 		storageName = gets('storagePath') + '/' + getRelative(newFile, gets('inboundFilePath'))
 		processFile(db, newFile, storageName)
 		storeFile(path, metadata, storageName)
+	else:
+		log('Skipping:    ' + getRelative(path, gets('dropbox_base_dir')) + '. File already exists.')
 	return
+
+def getRevision(file):
+	cur = db.cursor()
+	cur.execute('SELECT revision FROM files WHERE path = (?)',(file,))
+	results = cur.fetchall()
+	if not results:
+		return None
+	else:
+		return results[0][0]
 
 def wipeAll():
 	dbFile = gets('picpidir') + '/' + 'file_list.db'
@@ -298,14 +330,6 @@ def getNewFiles():
 		sys.exit(1)
 	fileList, dirList = dropboxWalk(client, baseDir)
 	log("Syncing complete.")
-
-	"""
-	times['processing'] = time.time()
-	for root, dir, files in os.walk(gets('inboundFilePath')):
-		for fname in files:
-			currentFile = root + "/" + fname
-			#processFile(db, currentFile)
-	"""
 	return
 
 def runSlideShow():
@@ -325,34 +349,53 @@ def runSlideShow():
 	if not found:
 		raise Exception('No suitable video driver found.')
 
+	log('Available resolutions: ' + str(pygame.display.list_modes()))
+	if pygame.display.mode_ok(pygame.display.list_modes()[0],pygame.FULLSCREEN):
+		log('Setting resolution: ' + str(pygame.display.list_modes()[0]))
+		pygame.display.set_mode(pygame.display.list_modes()[0],pygame.FULLSCREEN)
+
+
 	screenSize = (pygame.display.Info().current_w, pygame.display.Info().current_h)
 	screen = pygame.display.set_mode(screenSize, pygame.FULLSCREEN)
 
 	# Make mouse cursor go away
+	log('Making mouse cursor disappear.',2)
 	pygame.mouse.set_visible(False)
 
 	# Init it
+	log('Attempting to init pygame.',2)
 	pygame.init()
+	log('Past pygame.init',2)
 
 	firstIteration = True
 	while 1:
+		log('Beginning slideshow loop.',2)
 		if firstIteration == False:
-			for waitTime in range(int(gets('pictureDuration'))):
-				pygame.time.wait(1000)
-				checkEvents()
+			log('Waiting.',3)
+			for waitTime in range(int(gets('pictureDuration'))*4):
+				pygame.time.wait(250)
+				nextPic = checkEvents()
+				if nextPic:
+					log('Next pic.')
+					break
 		firstIteration = False
+		log('Checking for files in ' + gets('storagePath'),2)
 		if os.listdir(gets('storagePath')) == []:
 			log("No files in " + gets('StoragePath'))
 			waitPage('nofiles')
 		else:
 			fileName = getFilenameFromDB()
+			log('Displaying file: ' + fileName,1)
 			if os.path.splitext(fileName)[1].lower()[1:] not in gets('picExts').split(','):
 				log("skipping " + fileName + ". Not a picture.")
 				continue
+			if not os.path.exists(fileName):
+				log('Database does not match storage Contents: File ' + fileName + ' does not exist on disk.  Please run verify on database contents.')
 
 			# Get the size appropriate for the new pictures for resizing
 			# Maintains aspect ratio.
 			newSize = getNewSize(fileName)
+			log('newSize: ' + repr(newSize))
 
 			img = pygame.image.load(fileName).convert()
 			img = pygame.transform.scale(img, newSize)
@@ -393,13 +436,26 @@ def waitPage(status):
 		pygame.display.flip()
 	return
 
-def checkEvents():
+def checkEvents(fileName=None):
+	nextPic = False
 	for e in pygame.event.get():
 		if e.type == pygame.KEYDOWN:
+			if e.key == pygame.K_SPACE:
+				log('Advancing slideshow manually.',2)
+				nextPic = True
+			if e.key == pygame.K_x or e.key == pygame.K_BACKSPACE or e.key == pygame.K_DELETE:
+				blacklistPic(fileName)
+				nextPic = True
 			if e.key == pygame.K_q:
-				logIt(1,'Q key pressed.  Exiting application.')
+				log('Q key pressed.  Exiting application.')
 				pygame.quit()
 				sys.exit()
+	return nextPic
+
+def blacklistPic(fileName):
+	log('in blacklistPic(' + fileName + ')',2)
+	db.cursor().execute('UPDATE files SET blacklisted = 1 WHERE local_path = (?)',(fileName,))
+	db.commit()
 	return
 
 def getImgCenterCoords(img):
@@ -409,14 +465,10 @@ def getImgCenterCoords(img):
 	height = img.get_rect().size[1]
 	imgCenterVert = int(height / 2)
 
-	#logIt(1,'center: ' + str(imgCenterHoriz))
-	#logIt(1,'center: ' + str(imgCenterVert))
-
 	centerHoriz = True
-	#logIt(1,'img ratio: ' + str(width / height))
-	#logIt(1,'screen ratio: ' + str(screenResolution[0] / screenResolution[1]))
 
 	imgRatio = width / height
+	screenResolution = getResolution()
 	screenRatio = screenResolution[0] / screenResolution[1]
 	if imgRatio > screenRatio:
 		centerHoriz = False
@@ -430,25 +482,20 @@ def getImgCenterCoords(img):
 
 	return (imgX, imgY)
 
-def logIt(debugLevel,msg):
-	if debugLevel <= int(gets('debug')):
-		f = open('/home/pi/sda1/picpi/log.txt','aw')
-		f.write(msg + '\n')
-	return
-
 def getImgSize(fileName):
 	return Image.open(fileName).size
 
-def getNewSize(fileName, newWidth=int(gets('resize_width')), newHeight=int(gets('resize_height'))):
+def getNewSize(fileName, newWidth=None, newHeight=None):
+	log('getNewSize() entered',3)
 	imageSize = getImgSize(fileName)
 	if newWidth:
 		useWidth = newWidth
 	else:
-		useWidth = screenResolution[0]
+		useWidth = getResolution()[0]
 	if newHeight:
 		useHeight = newHeight
 	else:
-		useHeight = screenResolution[1]
+		useHeight = getResolution()[1]
 	
 	ratioWidth = useWidth / imageSize[0]
 	ratioHeight = useHeight / imageSize[1]
@@ -458,18 +505,35 @@ def getNewSize(fileName, newWidth=int(gets('resize_width')), newHeight=int(gets(
 	width = int(math.floor(imageSize[0] * useRatio))
 	height = int(math.floor(imageSize[1] * useRatio))
 
+	log('getNewSize() returns ' + str(width) + 'x' + str(height) + 'as tuple.')
 	return (width, height)
 
-def log(msg, mode=0):
-	newMsg = stamp() + ' - ' + msg
-	if mode == 1:
-		print newMsg,
-	elif mode == 2:
-		print msg
-	elif mode == 3:
-		print msg,
-	else:
-		print newMsg
+def copyExif(source, destination):
+	# Get source metadata
+	srcmeta = pyexiv2.ImageMetadata(source)
+	srcmeta.read()
+
+	# Get Destination metadata
+	destmeta = pyexiv2.ImageMetadata(destination)
+	destmeta.read()
+
+	# Copy metadata to new file
+	srcmeta.copy(destmeta)
+	destmeta.write()
+	return
+
+def log(msg, debugLevel=0):
+	if int(gets('debug')) >= debugLevel:
+		if debugLevel > 0:
+			debugMsg = ' - DEBUG' + str(debugLevel)
+		else:
+			debugMsg = ' - INFO  '
+		newMsg = stamp() + debugMsg + ' - ' + msg
+		f=open(gets('picpidir') + '/picpi.log', 'aw')
+		if not slideshowMode:
+			print(newMsg)
+		print(newMsg,file=f)
+		f.close()
 	return
 
 def refreshFiles():
