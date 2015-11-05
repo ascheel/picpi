@@ -6,7 +6,9 @@ Packages:
 jhead
 sqlite3
 python-arrow
+python-dateutil (required by arrow)
 python-pyexiv2
+python-dropbox from https://www.dropbox.com/developers-v1/core/sdks/python
 """
 from __future__ import division
 from __future__ import print_function
@@ -27,10 +29,13 @@ import arrow
 import pyexiv2
 from PIL import Image
 
+VERSION='0.7.0'
+
 def main():
 	global db
 	global times
 	global slideshowMode
+	global MAX_RES
 	slideshowMode = False
 
 	if len(sys.argv) > 1 and sys.argv[1] == 'config':
@@ -38,42 +43,62 @@ def main():
 	if len(sys.argv) > 1 and sys.argv[1] == 'wipe':
 		wipeAll()
 		log('Wiped.')
-		sys.exit(0)
-	if not os.path.isfile('/home/pi/.picpi.conf'):
+		cleanUp(0)
+	if not os.path.isfile(os.path.expanduser('~') + '/.picpi.conf'):
 		log('picpi does not appear to be configured.  Please run this first: ' + sys.argv[0] + ' config')
-		sys.exit(0)
+		cleanUp(0)
 
 	set_config()
 
-	times = {'program start':time.time(),}
+	if gets('max_res_x') and gets('max_res_y'):
+		MAX_RES = (int(gets('max_res_x')),int(gets('max_res_y')))
+	else:
+		MAX_RES = (640,480)
 
-	db = getSQLite3()
+	times = {'program start':time.time(),}
 
 	# Do our directories exist?
 	dirList = ('picpiDir','storagePath','inboundFilePath','tmpPath',)
 	for dir in dirList:
 		if not os.path.isdir(gets(dir)):
+			log('Creating directory: ' + dir,3)
 			os.mkdir(gets(dir))
 
-	screenResolution = getResolution()
+	db = getSQLite3()
 
+	log('Command line arguments: ' + repr(sys.argv))
 	if len(sys.argv) > 1 and sys.argv[1] == 'refresh':
+		log('Refreshing files.',1)
 		refreshFiles()
+	elif len(sys.argv) > 1 and sys.argv[1] == 'clear_blacklist':
+		resetBlacklist()
+		cleanUp()
 	else:
+		log('Entering slideshow.',1)
 		slideshowMode = True
 		runSlideShow()
 
+	log('Complete time: ' + str(time.time()))
 	times['Complete'] = time.time()
 	return
 
+def cleanUp(status=0):
+	sys.exit(status)
+	return
+
 def p():
+	log('Entering pdb trace.')
 	import pdb
 	pdb.set_trace()
 	return
 
 def gets(setting):
 	c = getc()
-	return c.get('Main',setting)
+	try:
+		value = c.get('Main',setting)
+	except ConfigParser.NoOptionError:
+		value = None
+	return value
 
 def getc():
 	c = ConfigParser.ConfigParser()
@@ -82,14 +107,17 @@ def getc():
 	return c
 
 def set_config():
+	#log('Entering set_config()',1)
 	c = getc()
 	configFile = os.path.expanduser('~') + '/.picpi.conf'
+	#log('Config file: ' + configFile,2)
 	if os.path.isfile(configFile) and len(sys.argv) > 1 and sys.argv[1] == 'config':
 		log("Config file already exists: " + configFile)
 		log("If you really want to reconfigure picpi, please delete the config.")
 	if 'Main' not in c.sections():
 		c.add_section('Main')
 		baseDir = os.getcwd()
+		log('baseDir = ' + baseDir,2)
 		c.set('Main','picpiDir',baseDir + '/picpi')
 		c.set('Main','storagePath',baseDir + '/picpi/storage')
 		c.set('Main','inboundFilePath',baseDir + '/picpi/inbound')
@@ -102,12 +130,14 @@ def set_config():
 		c.set('Main','debug',0)
 		c.set('Main','dropbox_access_token','')
 		c.set('Main','dropbox_base_dir','/Media/picpi')
+		#c.set('Main','max_res_x','640')
+		#c.set('Main','max_res_y','480')
 		cfg = open(configFile,'w')
 		c.write(cfg)
 		cfg.close()
 		log("picpi configured with default settings.")
 		log("If customization is needed, please edit " + configFile)
-		sys.exit(0)
+		cleanUp(0)
 	return
 
 def stamp():
@@ -115,6 +145,7 @@ def stamp():
 	return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))
 
 def getSQLite3():
+	log('Entering getSQLite3()',2)
 	# Opens the DB, creates if it does not exist.
 	dbName = gets('picpiDir') + '/file_list.db'
 	db = sqlite3.connect(dbName)
@@ -131,22 +162,8 @@ def getSQLite3():
 	db.commit()
 	return db
 
-def getResolution():
-	log('in getResolution()',3)
-	#global screenResolution
-	log('Running fbset to get resolution.',2)
-	screenResolution = subprocess.check_output("fbset -s | grep '^mode' | sed 's/\"//g' | awk '{ print $2 }'", shell=True).rstrip()
-	minusPos = screenResolution.find('-')
-	if minusPos >= 0:
-		screenResolution = screenResolution[0:minusPos].split('x')
-	log('Returned from fbset.',3)
-	log('screenResolution: ' + repr(screenResolution),2)
-	screenResolution = (int(screenResolution[0]),int(screenResolution[1]))
-	#screenResolution = (1920,1080)	#assume 1080p
-	log("Found resolution: " + repr(screenResolution),2)
-	return screenResolution
-
 def isAnimatedGif(fileName):
+	log('in isAnimatedGif(' + fileName + ')',2)
 	gif = Image.open(fileName)
 	try:
 		gif.seek(1)
@@ -154,33 +171,39 @@ def isAnimatedGif(fileName):
 		animated = False
 	else:
 		animated = True
+	log('animated=' + repr(animated),1)
 	return animated
 
 def resizeImage(currentFile,newFName):
-	log("Resizing:    " + currentFile,2)
+	log('in resizeImage(' + currentFile + ',' + newFName + ')',2)
 	image = Image.open(currentFile)
+	log('resizing to ' + gets('resize_width') + 'x' + gets('resize_height'),2)
 	image.thumbnail((int(gets('resize_width')),int(gets('resize_height'))), Image.ANTIALIAS)
 	image.save(newFName)
 
 	#Copy exif data
+	log('Copying exif data.',2)
 	copyExif(currentFile,newFName)
 	return
  
 def rotateImage(newFName):
-	log("Rotating:    " + newFName,2)
+	log('in rotateImage(' + newFName + ')',2)
 	subprocess.call('jhead -autorot -q \"{}\" >/dev/null 2>&1'.format(newFName), shell=True)
 	return
 
 def incrementFile(filename):
+	log('in incrementFile(' + filename + ')',2)
 	fileRoot, fileExt = os.path.splitext(filename)
 	suffixNum = 1
 	newName = '{}_{}{}'.format(fileRoot, suffixNum, fileExt)
 	while os.path.isfile(newName):
+		log('file exists, incrementing: ' + newName,2)
 		suffixNum += 1
 		newName = '{}_{}{}'.format(fileRoot, suffixNum, fileExt)
 	return newName
 
 def processFile(db, currentFile, newFName):
+	log('in processFile(' + repr(db) + ',' + currentFile + ',' + newFName + ')',2)
 	fileExt = os.path.splitext(currentFile)[1]
 	fileBase = os.path.split(currentFile)[1]
 	tmpName = gets('tmpPath') + "/" + fileBase
@@ -263,7 +286,7 @@ def getDropboxFile(client, path):
 		newTime = arrow.get(metadata['client_mtime'].replace('+0000',''),'ddd, D MMM YYYY HH:mm:ss').to('local').timestamp
 		os.utime(newFile,(newTime,newTime))
 
-		log(" - Speed: " + str(round(bps / 1024,2)) + ' MB/s',2)
+		log(" - Speed: " + str(round(bps / 1024,2)) + ' MB/s')
 
 		storageName = gets('storagePath') + '/' + getRelative(newFile, gets('inboundFilePath'))
 		processFile(db, newFile, storageName)
@@ -296,7 +319,7 @@ def wipeAll():
 
 def storeFile(path, metadata, newPath):
 	cur = db.cursor()
-	cur.execute('INSERT INTO files VALUES (?, ?, ?, ?, ?, ?)', (path, metadata['revision'], metadata['bytes'], stamp(), metadata['client_mtime'].replace('+0000',''), newPath))
+	cur.execute('INSERT INTO files VALUES (?, ?, ?, ?, ?, ?, ?)', (path, metadata['revision'], metadata['bytes'], stamp(), metadata['client_mtime'].replace('+0000',''), newPath, 0))
 	db.commit()
 	return
 
@@ -327,13 +350,14 @@ def getNewFiles():
 	baseDir = gets('dropbox_base_dir')
 	if not client.metadata(baseDir)['is_dir']:
 		log('base Dropbox path is not a directory.')
-		sys.exit(1)
+		cleanUp(1)
 	fileList, dirList = dropboxWalk(client, baseDir)
 	log("Syncing complete.")
 	return
 
 def runSlideShow():
-	drivers = ('directfb', 'fbcon', 'svgalib')
+	#drivers = ('directfb', 'fbcon', 'svgalib')
+	drivers = ('directfb', 'fbcon', 'svgalib', 'x11', 'dga', 'ggi', 'vgl', 'aalib')
 	os.putenv('SDL_FBDEV', '/dev/fb0')
 
 	found = False
@@ -349,14 +373,22 @@ def runSlideShow():
 	if not found:
 		raise Exception('No suitable video driver found.')
 
-	log('Available resolutions: ' + str(pygame.display.list_modes()))
-	if pygame.display.mode_ok(pygame.display.list_modes()[0],pygame.FULLSCREEN):
-		log('Setting resolution: ' + str(pygame.display.list_modes()[0]))
-		pygame.display.set_mode(pygame.display.list_modes()[0],pygame.FULLSCREEN)
+	log('Available resolutions: ' + str(pygame.display.list_modes()),2)
+	if pygame.display.mode_ok(pygame.display.list_modes()[0]):
+		if os.getenv('DISPLAY') == None:
+			log('Setting resolution: ' + str(pygame.display.list_modes()[0]))
+			screen = pygame.display.set_mode(pygame.display.list_modes()[0],pygame.FULLSCREEN)
+			global MAX_RES
+			MAX_RES = pygame.display.list_modes()[0]
+		else:
+			log('Setting resolution default: ' + repr(MAX_RES))
+			screen = pygame.display.set_mode(MAX_RES)
+	else:
+		log('Oh crap.  No video modes available.')
 
 
-	screenSize = (pygame.display.Info().current_w, pygame.display.Info().current_h)
-	screen = pygame.display.set_mode(screenSize, pygame.FULLSCREEN)
+	#screenSize = (pygame.display.Info().current_w, pygame.display.Info().current_h)
+	#screen = pygame.display.set_mode(screenSize, pygame.FULLSCREEN)
 
 	# Make mouse cursor go away
 	log('Making mouse cursor disappear.',2)
@@ -364,17 +396,20 @@ def runSlideShow():
 
 	# Init it
 	log('Attempting to init pygame.',2)
-	pygame.init()
+	#pygame.init()
 	log('Past pygame.init',2)
 
+	fileName = ''
 	firstIteration = True
+	global images
+	images = []
 	while 1:
 		log('Beginning slideshow loop.',2)
 		if firstIteration == False:
 			log('Waiting.',3)
 			for waitTime in range(int(gets('pictureDuration'))*4):
 				pygame.time.wait(250)
-				nextPic = checkEvents()
+				nextPic = checkEvents(fileName)
 				if nextPic:
 					log('Next pic.')
 					break
@@ -382,7 +417,7 @@ def runSlideShow():
 		log('Checking for files in ' + gets('storagePath'),2)
 		if os.listdir(gets('storagePath')) == []:
 			log("No files in " + gets('StoragePath'))
-			waitPage('nofiles')
+			waitPage(screen, 'nofiles')
 		else:
 			fileName = getFilenameFromDB()
 			log('Displaying file: ' + fileName,1)
@@ -399,23 +434,23 @@ def runSlideShow():
 
 			img = pygame.image.load(fileName).convert()
 			img = pygame.transform.scale(img, newSize)
-			
-			# newSize might work, but let's get the real size just to be sure
-			loadedImageSize = img.get_rect().size
+			images.append(img)
 
-			# We start with a black screen to overwrite anything previously present
-			screen.fill((0,0,0))
+			transition(screen, 'fade',images)
+			if len(images) == 2:
+				del images[0]
+	return
 
-			# Blit our image to the screen, centered.
-			screen.blit(img,getImgCenterCoords(img))
-
-			# But nothing shows up until we update.
-			pygame.display.update()
+def resetBlacklist():
+	log('Resetting blacklist')
+	cur = db.cursor()
+	cur.execute('UPDATE files SET blacklisted = 0 WHERE blacklisted = 1')
+	cur.commit()
 	return
 
 def getFilenameFromDB():
 	cur = db.cursor()
-	cur.execute('SELECT local_path FROM files ORDER BY RANDOM() LIMIT 1')
+	cur.execute('SELECT local_path FROM files WHERE blacklisted != 1 ORDER BY RANDOM() LIMIT 1')
 	results = cur.fetchall()
 	if not results:
 		fileName = ""
@@ -423,7 +458,8 @@ def getFilenameFromDB():
 		fileName = results[0][0]
 	return fileName
 
-def waitPage(status):
+def waitPage(screen, status):
+	pygame.font.init()
 	if status == 'nofiles':
 		screen.convert()
 		screen.fill((255,255,255))	#Give us some white
@@ -443,13 +479,13 @@ def checkEvents(fileName=None):
 			if e.key == pygame.K_SPACE:
 				log('Advancing slideshow manually.',2)
 				nextPic = True
-			if e.key == pygame.K_x or e.key == pygame.K_BACKSPACE or e.key == pygame.K_DELETE:
+			if e.key == pygame.K_BACKSPACE or e.key == pygame.K_DELETE:
 				blacklistPic(fileName)
 				nextPic = True
 			if e.key == pygame.K_q:
 				log('Q key pressed.  Exiting application.')
 				pygame.quit()
-				sys.exit()
+				cleanUp()
 	return nextPic
 
 def blacklistPic(fileName):
@@ -458,29 +494,62 @@ def blacklistPic(fileName):
 	db.commit()
 	return
 
-def getImgCenterCoords(img):
+def transition(screen,transType,images):
+	if transType == 'fade':
+		MAX_ALPHA = 255
+		MIN_ALPHA = 1
+		FRAME_DURATION = 2
+		ALPHA_STEP = 5
+		BLACK = (0,0,0)
+		if len(images) == 2:
+			img2, img1 = images
+			for a in range(MIN_ALPHA,MAX_ALPHA,ALPHA_STEP):
+				pygame.time.wait(FRAME_DURATION)
+				screen.fill(BLACK)
+				img1.set_alpha(a)
+				img2.set_alpha(MAX_ALPHA-a)
+				screen.blit(img1,tl(img1))
+				screen.blit(img2,tl(img2))
+				pygame.display.flip()
+		else:
+			img=images[0]
+			screen.fill((0,0,0))
+			screen.blit(img,tl(img))
+			pygame.display.flip()
+	if transType == 'vert_wipe':
+		# Yeah...  this is broken.
+		img = images[0]
+		size = img.get_size()
+		num_fade_rows=16
+		offset=0
+		background_color=(0,0,0)
+		fade_factor = int(256/num_fade_rows)
+		for i in range(0,(size[1]+num_fade_rows)):
+			arr = pygame.surfarray.pixels_alpha(img)
+			offset += 1
+			for i in range(0,num_fade_rows):
+				if((offset - i) < 0):
+					continue
+				else:
+					for j in range(0, (size[0]-1)):
+						if (arr[j][offset-i] <= fade_factor):
+							arr[j][offset-i]=0
+						else:
+							arr[j][offset-i] -= fade_factor
+			del arr
+			display_surface.fill(background_color)
+			display_surface.blit(image_surface, (0,64))
+			pygame.display.flip()
+	return
+
+def tl(img):
+	screenW = pygame.display.Info().current_w
+	screenH = pygame.display.Info().current_h
 	width = img.get_rect().size[0]
-	imgCenterHoriz = int(width / 2)
-
 	height = img.get_rect().size[1]
-	imgCenterVert = int(height / 2)
-
-	centerHoriz = True
-
-	imgRatio = width / height
-	screenResolution = getResolution()
-	screenRatio = screenResolution[0] / screenResolution[1]
-	if imgRatio > screenRatio:
-		centerHoriz = False
-
-	if centerHoriz == True:
-		imgX = (screenResolution[0] / 2) - imgCenterHoriz
-		imgY = 0
-	else:
-		imgX = 0
-		imgY = (screenResolution[1] / 2) - imgCenterVert
-
-	return (imgX, imgY)
+	tl_w = int(screenW / 2) - int(width / 2)
+	tl_h = int(screenH / 2) - int(height / 2)
+	return tl_w, tl_h
 
 def getImgSize(fileName):
 	return Image.open(fileName).size
@@ -491,11 +560,11 @@ def getNewSize(fileName, newWidth=None, newHeight=None):
 	if newWidth:
 		useWidth = newWidth
 	else:
-		useWidth = getResolution()[0]
+		useWidth = MAX_RES[0]
 	if newHeight:
 		useHeight = newHeight
 	else:
-		useHeight = getResolution()[1]
+		useHeight = MAX_RES[1]
 	
 	ratioWidth = useWidth / imageSize[0]
 	ratioHeight = useHeight / imageSize[1]
@@ -505,7 +574,7 @@ def getNewSize(fileName, newWidth=None, newHeight=None):
 	width = int(math.floor(imageSize[0] * useRatio))
 	height = int(math.floor(imageSize[1] * useRatio))
 
-	log('getNewSize() returns ' + str(width) + 'x' + str(height) + 'as tuple.')
+	log('getNewSize() returns ' + str(width) + 'x' + str(height) + ' as tuple.')
 	return (width, height)
 
 def copyExif(source, destination):
@@ -530,7 +599,7 @@ def log(msg, debugLevel=0):
 			debugMsg = ' - INFO  '
 		newMsg = stamp() + debugMsg + ' - ' + msg
 		f=open(gets('picpidir') + '/picpi.log', 'aw')
-		if not slideshowMode:
+		if not slideshowMode and debugLevel > 0:
 			print(newMsg)
 		print(newMsg,file=f)
 		f.close()
