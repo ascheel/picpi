@@ -261,6 +261,32 @@ def dropboxWalk(client, path, fileList=[], dirList=[]):
 		getDropboxFile(client, data['path'])
 	return fileList, dirList
 
+def deleteRemoved():
+	client = dropbox.client.DropboxClient(gets('dropbox_access_token'))
+	for dir in os.walk(gets('inboundFilePath')):
+		for file in dir[2]:
+			fileToCheck = dir[0] + '/' + file
+			log('Checking dropbox for: ' + getRelative(fileToCheck, gets('inboundFilePath')),3)
+			checkPath = gets('dropbox_base_dir') + '/' + getRelative(fileToCheck, gets('inboundFilePath'))
+			try:
+				metadata = client.metadata(checkPath)
+				if 'is_deleted' in metadata:
+					if metadata['is_deleted'] == True:
+						log('Deleting file removed from dropbox: ' + fileToCheck)
+						deleteFile(fileToCheck)
+						continue
+			except dropbox.rest.ErrorResponse as e:
+				if e.status == 404:
+					log('Deleting file not in dropbox: ' + fileToCheck)
+					deleteFile(fileToCheck)
+	return
+
+def deleteFile(fileName):
+	os.remove(fileName)
+	cur = db.cursor()
+	cur.execute('DELETE FROM files WHERE local_path = (?)',(fileName,))
+	return
+
 def getDropboxFile(client, path):
 	for file in os.listdir(gets('tmppath')):
 		os.remove(gets('tmppath') + '/' + file)
@@ -355,7 +381,34 @@ def getNewFiles():
 	log("Syncing complete.")
 	return
 
+def removeLock(source):
+	os.remove(gets('picpiDir') + '/picpi.' + source + '.pid')
+	return
+
+def pidLockFile(source):
+	pidFileName = gets('picpiDir') + '/picpi.' + source + '.pid'
+	if os.path.exists(pidFileName):
+		with open(pidFileName) as pidFile:
+			storedPid = pidFile.read()
+		procFileName = '/proc/' + storedPid + '/cmdline'
+		if os.path.isfile(procFileName):
+			with open(procFileName) as procFile:
+				cmd = procFile.read().split('\x00')
+			if len(cmd) >= 2:
+				if os.path.basename(cmd[0]) == 'python' and os.path.basename(cmd[1]) == os.path.basename(__file__):
+					print('Slideshow already in progress on PID ' + storedPid + '. Exiting')
+					log('Slideshow already in progress on PID ' + storedPid + '. Exiting.')
+					sys.exit(1)
+		os.remove(pidFileName)
+	with open(pidFileName,'w') as pidFile:
+		pidFile.write(str(os.getpid()))
+	return
+
 def runSlideShow():
+	global MAX_RES
+	
+	pidLockFile('slideshow')
+
 	#drivers = ('directfb', 'fbcon', 'svgalib')
 	drivers = ('directfb', 'fbcon', 'svgalib', 'x11', 'dga', 'ggi', 'vgl', 'aalib')
 	os.putenv('SDL_FBDEV', '/dev/fb0')
@@ -377,9 +430,11 @@ def runSlideShow():
 	if pygame.display.mode_ok(pygame.display.list_modes()[0]):
 		if os.getenv('DISPLAY') == None:
 			log('Setting resolution: ' + str(pygame.display.list_modes()[0]))
-			screen = pygame.display.set_mode(pygame.display.list_modes()[0],pygame.FULLSCREEN)
-			global MAX_RES
-			MAX_RES = pygame.display.list_modes()[0]
+			if gets('force_width') and gets('force_height'):
+				MAX_RES = (int(gets('force_width')),int(gets('force_height')))
+			else:
+				MAX_RES = pygame.display.list_modes()[0]
+			screen = pygame.display.set_mode(MAX_RES,pygame.FULLSCREEN)
 		else:
 			log('Setting resolution default: ' + repr(MAX_RES))
 			screen = pygame.display.set_mode(MAX_RES)
@@ -402,6 +457,7 @@ def runSlideShow():
 	fileName = ''
 	firstIteration = True
 	global images
+	nextPic = False
 	images = []
 	while 1:
 		log('Beginning slideshow loop.',2)
@@ -436,7 +492,7 @@ def runSlideShow():
 			img = pygame.transform.scale(img, newSize)
 			images.append(img)
 
-			transition(screen, 'fade',images)
+			transition(screen, 'fade',images,nextPic)
 			if len(images) == 2:
 				del images[0]
 	return
@@ -485,6 +541,7 @@ def checkEvents(fileName=None):
 			if e.key == pygame.K_q:
 				log('Q key pressed.  Exiting application.')
 				pygame.quit()
+				removeLock('slideshow')
 				cleanUp()
 	return nextPic
 
@@ -494,12 +551,15 @@ def blacklistPic(fileName):
 	db.commit()
 	return
 
-def transition(screen,transType,images):
+def transition(screen,transType,images,manualAdvance=False):
 	if transType == 'fade':
 		MAX_ALPHA = 255
 		MIN_ALPHA = 1
-		FRAME_DURATION = 2
 		ALPHA_STEP = 5
+		FRAME_DURATION = 0
+		if manualAdvance:
+			ALPHA_STEP = 25
+			FRAME_DURATION = 0
 		BLACK = (0,0,0)
 		if len(images) == 2:
 			img2, img1 = images
@@ -510,12 +570,12 @@ def transition(screen,transType,images):
 				img2.set_alpha(MAX_ALPHA-a)
 				screen.blit(img1,tl(img1))
 				screen.blit(img2,tl(img2))
-				pygame.display.flip()
+				pygame.display.update()
 		else:
 			img=images[0]
 			screen.fill((0,0,0))
 			screen.blit(img,tl(img))
-			pygame.display.flip()
+			pygame.display.update()
 	if transType == 'vert_wipe':
 		# Yeah...  this is broken.
 		img = images[0]
@@ -599,19 +659,23 @@ def log(msg, debugLevel=0):
 			debugMsg = ' - INFO  '
 		newMsg = stamp() + debugMsg + ' - ' + msg
 		f=open(gets('picpidir') + '/picpi.log', 'aw')
-		if not slideshowMode and debugLevel > 0:
+		if not slideshowMode:
 			print(newMsg)
 		print(newMsg,file=f)
 		f.close()
 	return
 
 def refreshFiles():
+	pidLockFile('refresh')
 	times['refresh'] = time.time()
 	resolution = ""
 
 	log("Checking for new files.")
 	getNewFiles()
 
+	deleteRemoved()
+
+	removeLock('refresh')
 	return
 
 if __name__ == "__main__":
