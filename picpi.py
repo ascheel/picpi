@@ -37,6 +37,7 @@ def main():
 	global slideshowMode
 	global MAX_RES
 	slideshowMode = False
+	times = {}
 
 	if len(sys.argv) > 1 and sys.argv[1] == 'config':
 		set_config()
@@ -48,14 +49,14 @@ def main():
 		log('picpi does not appear to be configured.  Please run this first: ' + sys.argv[0] + ' config')
 		cleanUp(0)
 
-	set_config()
+	#read_config()
 
 	if gets('max_res_x') and gets('max_res_y'):
 		MAX_RES = (int(gets('max_res_x')),int(gets('max_res_y')))
 	else:
 		MAX_RES = (640,480)
 
-	times = {'program start':time.time(),}
+	times['program start'] = time.time()
 
 	# Do our directories exist?
 	dirList = ('picpiDir','storagePath','inboundFilePath','tmpPath',)
@@ -78,11 +79,13 @@ def main():
 		slideshowMode = True
 		runSlideShow()
 
-	log('Complete time: ' + str(time.time()))
 	times['Complete'] = time.time()
+	cleanUp()
 	return
 
 def cleanUp(status=0):
+	for key, value in times.iteritems():
+		print(key + ' - ' + str(time.localtime(value)))
 	sys.exit(status)
 	return
 
@@ -111,12 +114,71 @@ def set_config():
 	c = getc()
 	configFile = os.path.expanduser('~') + '/.picpi.conf'
 	#log('Config file: ' + configFile,2)
+
+	baseDir = os.getcwd()
+	print('********************************************************************************')
+	print('The Base Directory is the directory which all others are based off of.\nInbound files and resized files will all be stored in this directory.\nThe default is the current directory (' + os.getcwd() + ').\n')
+	tmp = raw_input('1)  What Base Directory would you like to use?  <Enter> for default: ')
+	if tmp != '':
+		baseDir = tmp
+
+	inboundFilePath = baseDir + '/inbound'
+	print('********************************************************************************')
+	print('The Inbound File Path stores files as they are pulled from the remote location.\nThe default location is (' + baseDir + '/inbound' + ')\n')
+	tmp = raw_input('2)  What Inbound File Path would you like to use?  <Enter> for default: ')
+	if tmp != '':
+		inboundFilePath = tmp
+
+	storagePath = baseDir + '/storage'
+	print('********************************************************************************')
+	print('The Storage Path stores files after they are reduced in size.\nThe default location is(' + baseDir + '/storage' + ')\n')
+	tmp = raw_input('3)  What Storage Path would you like to use?  <Enter> for default: ')
+	if tmp != '':
+		storagePath = tmp
+
+	tmpPath = baseDir + '/tmp'
+	print('********************************************************************************')
+	print('The Temporary Path stores files temporarily during resizing and rotating.\nThis prevents a partially converted file due to a program interruption from being stored permanently.\n')
+	tmp = raw_input('4)  What Temporary Path would you like to use?  <Enter> for default: ')
+	if tmp != '':
+		tmpPath = tmp
+
+	print('********************************************************************************')
+	print('If you don\'t know what this is, please leave it blank.  One will be generated for you.\nIf you have an existing one you\'d like to use, enter it here.\n')
+	dropbox_access_token = raw_input('5)  Enter your Dropbox Access Token.  There is no default: ')
+	while dropbox_access_token == '':
+		app_key = 'xe0mrs40eqfvcsj'
+		app_secret = '0tgeubc7ujjlo6t'
+		flow = dropbox.client.DropboxOAuth2FlowNoRedirect(app_key, app_secret)
+		authURL = flow.start()
+		print('')
+		print('    a) Copy and paste this URL into a browser:\n       ' + authURL)
+		print('    b) Click \'Allow\'.  You may be required to log into your DropBox account, first.')
+		authCode = raw_input('    c) Copy and Paste the Authorization Code here: ').strip()
+		try:
+			dropbox_access_token = flow.finish(authCode)[0]
+		except dropbox.rest.ErrorResponse:
+			print('')
+			print('     **************************************************')
+			print('     * Invalid authorization code.  Please try again. *')
+			print('     **************************************************')
+			dropbox_access_token = ''
+			continue
+		print('Testing... ',end='')
+		try:
+			client = dropbox.client.DropboxClient(dropbox_access_token)
+			print('SUCCESS!')
+		except dropbox.rest.ErrorResponse:
+			print('Failed.  Invalid access token.  Please try again.')
+			dropbox_access_token = ''
+
+	sys.exit(0)
+
 	if os.path.isfile(configFile) and len(sys.argv) > 1 and sys.argv[1] == 'config':
 		log("Config file already exists: " + configFile)
 		log("If you really want to reconfigure picpi, please delete the config.")
 	if 'Main' not in c.sections():
 		c.add_section('Main')
-		baseDir = os.getcwd()
 		log('baseDir = ' + baseDir,2)
 		c.set('Main','picpiDir',baseDir + '/picpi')
 		c.set('Main','storagePath',baseDir + '/picpi/storage')
@@ -129,7 +191,7 @@ def set_config():
 		c.set('Main','resize_height',1920)	# Same as width in case someone wants to go vertical with a monitor
 		c.set('Main','debug',0)
 		c.set('Main','dropbox_access_token','')
-		c.set('Main','dropbox_base_dir','/Media/picpi')
+		c.set('Main','dropbox_base_dir','/')
 		#c.set('Main','max_res_x','640')
 		#c.set('Main','max_res_y','480')
 		cfg = open(configFile,'w')
@@ -152,11 +214,11 @@ def getSQLite3():
 	cur = db.cursor()
 
 	tableName = 'files'
-	column_text = 'path TEXT UNIQUE, revision INTEGER, bytes INTEGER, date_synced REAL, modified TEXT, local_path TEXT, blacklisted INTEGER'
+	column_text = 'remote_filename TEXT UNIQUE, inbound_filename TEXT UNIQUE, storage_filename TEXT UNIQUE,revision INTEGER, bytes INTEGER, date_synced REAL, modified TEXT, blacklisted INTEGER'
 	cur.execute('CREATE TABLE IF NOT EXISTS {} ({})'.format(tableName, column_text))
 
 	tableName = 'directories'
-	column_text = 'path TEXT UNIQUE, hash TEXT, date_added REAL'
+	column_text = 'remote_dir TEXT UNIQUE, inbound_dir TEXT UNIQUE, storage_dir TEXT, hash TEXT, date_added REAL'
 	cur.execute('CREATE TABLE IF NOT EXISTS {} ({})'.format(tableName, column_text))
 
 	db.commit()
@@ -174,16 +236,16 @@ def isAnimatedGif(fileName):
 	log('animated=' + repr(animated),1)
 	return animated
 
-def resizeImage(currentFile,newFName):
-	log('in resizeImage(' + currentFile + ',' + newFName + ')',2)
-	image = Image.open(currentFile)
+def resizeImage(inboundFilename,tmpName):
+	log('in resizeImage(' + inboundFilename + ',' + tmpName + ')',2)
+	image = Image.open(inboundFilename)
 	log('resizing to ' + gets('resize_width') + 'x' + gets('resize_height'),2)
 	image.thumbnail((int(gets('resize_width')),int(gets('resize_height'))), Image.ANTIALIAS)
-	image.save(newFName)
+	image.save(tmpName)
 
 	#Copy exif data
 	log('Copying exif data.',2)
-	copyExif(currentFile,newFName)
+	copyExif(inboundFilename,tmpName)
 	return
  
 def rotateImage(newFName):
@@ -191,53 +253,47 @@ def rotateImage(newFName):
 	subprocess.call('jhead -autorot -q \"{}\" >/dev/null 2>&1'.format(newFName), shell=True)
 	return
 
-def incrementFile(filename):
-	log('in incrementFile(' + filename + ')',2)
-	fileRoot, fileExt = os.path.splitext(filename)
-	suffixNum = 1
-	newName = '{}_{}{}'.format(fileRoot, suffixNum, fileExt)
-	while os.path.isfile(newName):
-		log('file exists, incrementing: ' + newName,2)
-		suffixNum += 1
-		newName = '{}_{}{}'.format(fileRoot, suffixNum, fileExt)
-	return newName
+def makePath(pathToCreate):
+	pathToCreate = pathToCreate.lstrip('/')
+	for x in range(len(pathToCreate.split('/'))):
+		path = '/'.join(pathToCreate.split('/')[0:x+1])
 
-def processFile(db, currentFile, newFName):
-	log('in processFile(' + repr(db) + ',' + currentFile + ',' + newFName + ')',2)
-	fileExt = os.path.splitext(currentFile)[1]
-	fileBase = os.path.split(currentFile)[1]
-	tmpName = gets('tmpPath') + "/" + fileBase
+		for dirName in ('storagePath', 'inboundFilePath',):
+			if not os.path.exists(gets(dirName) + '/' + path):
+				os.mkdir(gets(dirName) + '/' + path)
+	return
+
+def processFile(db, remoteFilename):
+	log('in processFile(' + repr(db) + ',' + remoteFilename + ')',2)
+	ext = os.path.splitext(remoteFilename)[1][1:].lower()
+	fileBase = os.path.split(remoteFilename)[1]
+	inboundFilename = gets('inboundFilePath') + '/' + remoteFilename
+	tmpName = gets('tmpPath') + "/" + os.path.split(remoteFilename)[1]
+	storageFilename = gets('storagePath') + '/' + remoteFilename
 	
-	newPath = gets('storagePath') + "/" + getRelative(os.path.split(currentFile)[0], gets('inboundFilePath'))
-	newFName = newPath + "/" + fileBase
-	if not os.path.isdir(newPath):
-		log('Creating directory: ' + newPath,1)
-		os.mkdir(newPath)
+	makePath(os.path.split(remoteFilename)[0])
 
-	log("Processing:  " + currentFile,1)
-	if os.path.isfile(newFName):
-		newFName = incrementFile(newFName)
-	ext = fileExt[1:].lower()
+	log("Processing:  " + remoteFilename,1)
 
 	processIt = True
 	if ext not in gets('picExts').lower().split(','):
 		processIt = False
 	if ext == 'gif':
-		if isAnimatedGif(currentFile):
+		if isAnimatedGif(remoteFilename):
 			#We're only resizing and rotating if it's not animated.
 			#If it's animated, someone should have already oriented and resized it properly
 			ProcessIt = False
 
 	if processIt:
-		resizeImage(currentFile, tmpName)
+		resizeImage(inboundFilename, tmpName)
 		rotateImage(tmpName)
-	shutil.move(tmpName,newFName)
+	shutil.move(tmpName,storageFilename)
 
 	return
 
-def getHashFromDB(path):
+def getHashFromDB(remoteDir):
 	cur = db.cursor()
-	cur.execute('SELECT hash FROM directories WHERE path = ?', (path,))
+	cur.execute('SELECT hash FROM directories WHERE remote_dir = ?', (remoteDir,))
 	results = cur.fetchall()
 	if not results:
 		return None
@@ -248,11 +304,10 @@ def dropboxWalk(client, path, fileList=[], dirList=[]):
 	data = client.metadata(path)
 	if data['is_dir']:
 		dirList.append(data['path'])
-		relativePath = getRelative(data['path'],gets('dropbox_base_dir'))
-		newPath = gets('inboundFilePath') + '/' + relativePath
-		if not os.path.exists(newPath):
-			log('Creating directory: ' + newPath)
-			os.mkdir(newPath)
+		inboundDirname = gets('inboundFilePath') + '/' + path
+		if not os.path.exists(inboundDirname):
+			log('Creating directory: ' + inboundDirname)
+			os.mkdir(inboundDirname)
 			storeDir(path, data)
 		for entry in data['contents']:
 			dropboxWalk(client, entry['path'], fileList, dirList)
@@ -262,68 +317,74 @@ def dropboxWalk(client, path, fileList=[], dirList=[]):
 	return fileList, dirList
 
 def deleteRemoved():
+	times['deleteRemoved'] = time.time()
+	log('Checking for files no longer on remote side.')
 	client = dropbox.client.DropboxClient(gets('dropbox_access_token'))
 	for dir in os.walk(gets('inboundFilePath')):
 		for file in dir[2]:
-			fileToCheck = dir[0] + '/' + file
-			log('Checking dropbox for: ' + getRelative(fileToCheck, gets('inboundFilePath')),3)
-			checkPath = gets('dropbox_base_dir') + '/' + getRelative(fileToCheck, gets('inboundFilePath'))
+			inboundFilename = dir[0] + '/' + file
+			
+			remoteFilename = db.cursor().execute('SELECT remote_filename FROM files WHERE inbound_filename = (?)',(inboundFilename,)).fetchall()
+			if remoteFilename == []:
+				print("DANGER WILL ROBINSON!")
+			remote_filename = remoteFilename[0][0]
+
+			log('Checking dropbox for: ' + remoteFilename,3)
 			try:
-				metadata = client.metadata(checkPath)
+				metadata = client.metadata(remoteFilename)
 				if 'is_deleted' in metadata:
 					if metadata['is_deleted'] == True:
-						log('Deleting file removed from dropbox: ' + fileToCheck)
-						deleteFile(fileToCheck)
+						log('Deleting file removed from dropbox: ' + inboundFilename)
+						deleteFile(inboundFilename)
 						continue
 			except dropbox.rest.ErrorResponse as e:
 				if e.status == 404:
-					log('Deleting file not in dropbox: ' + fileToCheck)
-					deleteFile(fileToCheck)
+					log('Deleting file not in dropbox: ' + inboundFilename)
+					deleteFile(inboundFilename)
 	return
 
-def deleteFile(fileName):
-	os.remove(fileName)
+def deleteFile(storageFilename):
+	os.remove(storageFilename)
 	cur = db.cursor()
-	cur.execute('DELETE FROM files WHERE local_path = (?)',(fileName,))
+	cur.execute('DELETE FROM files WHERE storage_filename = (?)',(storageFilename,))
 	return
 
-def getDropboxFile(client, path):
+def getDropboxFile(client, remoteFilename):
 	for file in os.listdir(gets('tmppath')):
 		os.remove(gets('tmppath') + '/' + file)
-	newFile = gets('inboundFilePath') + '/' + getRelative(path, gets('dropbox_base_dir'))
-	metadata = client.metadata(path)
+	inboundFilename = gets('inboundFilePath') + '/' + remoteFilename
+	metadata = client.metadata(remoteFilename)
 
-	log('Database revision: ' + str(metadata['revision']) + ' - ' + str(getRevision(path)) + ' :Dropbox revision',2)
-	if not os.path.exists(newFile) or metadata['revision'] != getRevision(path):
+	log('Database revision: ' + str(metadata['revision']) + ' - ' + str(getRevision(remoteFilename)) + ' :Dropbox revision',2)
+	if not os.path.exists(inboundFilename) or metadata['revision'] != getRevision(remoteFilename):
 		log('In process if.',3)
-		log("Downloading: " + getRelative(path, gets('dropbox_base_dir')))
-		outFile = gets('tmpPath') + '/' + os.path.split(path)[1]
-		f = client.get_file(path)
-		save = open(outFile, 'w')
+		log("Downloading: " + remoteFilename)
+		tmpFilename = gets('tmpPath') + '/' + os.path.split(remoteFilename)[1]
+		f = client.get_file(remoteFilename)
+		save = open(tmpFilename, 'w')
 		startTime = int(round(time.time() * 1000))
 		save.write(f.read())
 		duration = int(round(time.time() * 1000)) - startTime
 		save.close()
-		shutil.move(outFile, newFile)
-		fileSize = os.path.getsize(newFile)
-		bps = fileSize / duration
+		shutil.move(tmpFilename, inboundFilename)
+		bps = os.path.getsize(inboundFilename) / duration
 
 		# Set modified time to that on Dropbox.  Don't use 'modified'.
 		newTime = arrow.get(metadata['client_mtime'].replace('+0000',''),'ddd, D MMM YYYY HH:mm:ss').to('local').timestamp
-		os.utime(newFile,(newTime,newTime))
+		os.utime(inboundFilename,(newTime,newTime))
 
-		log(" - Speed: " + str(round(bps / 1024,2)) + ' MB/s')
+		log("Speed: " + str(round(bps / 1024,2)) + ' MB/s',1)
 
-		storageName = gets('storagePath') + '/' + getRelative(newFile, gets('inboundFilePath'))
-		processFile(db, newFile, storageName)
-		storeFile(path, metadata, storageName)
+		storageFilename = gets('storagePath') + '/' + remoteFilename
+		processFile(db, remoteFilename)
+		storeFile(remoteFilename, metadata, storageFilename)
 	else:
-		log('Skipping:    ' + getRelative(path, gets('dropbox_base_dir')) + '. File already exists.')
+		log('Skipping:    ' + remoteFilename + '. File already exists.')
 	return
 
-def getRevision(file):
+def getRevision(remoteFilename):
 	cur = db.cursor()
-	cur.execute('SELECT revision FROM files WHERE path = (?)',(file,))
+	cur.execute('SELECT revision FROM files WHERE remote_filename = (?)',(remoteFilename,))
 	results = cur.fetchall()
 	if not results:
 		return None
@@ -343,31 +404,35 @@ def wipeAll():
 			log("Directory deleted: " + gets(dir))
 	return
 
-def storeFile(path, metadata, newPath):
+def storeFile(remoteFilename, metadata, storageFilename):
 	cur = db.cursor()
-	cur.execute('INSERT INTO files VALUES (?, ?, ?, ?, ?, ?, ?)', (path, metadata['revision'], metadata['bytes'], stamp(), metadata['client_mtime'].replace('+0000',''), newPath, 0))
+	cur.execute('INSERT INTO files VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (remoteFilename, gets('inboundFilePath') + '/' + remoteFilename, gets('storagePath') + '/' + remoteFilename ,metadata['revision'], metadata['bytes'], stamp(), metadata['client_mtime'].replace('+0000',''), 0))
 	db.commit()
 	return
 
-def storeDir(path, metadata):
+def storeDir(remote_dir, metadata):
 	cur = db.cursor()
-	cur.execute('INSERT INTO directories VALUES (?, ?, ?)', (path, metadata['hash'], stamp()))
+	cur.execute('INSERT INTO directories VALUES (?, ?, ?, ?, ?)', (remote_dir, gets('inboundFilePath') + '/' + remote_dir, gets('storagePath') + '/' + remote_dir, metadata['hash'], stamp()))
 	db.commit()
 	return
 
 def getRelative(path,base):
 	oldPath = path.split('/')
 	base_dir = base.split('/')
+	relativePath = None
 	try:
 		while base_dir[0].lower() == oldPath[0].lower():
 			del oldPath[0]
 			del base_dir[0]
 	except IndexError:
 		relativePath = '/'.join(oldPath)
+	if not relativePath:
+		relativePath = path
 	return relativePath
 
 def getNewFiles():
 	global db
+	global times
 	times['sync'] = time.time()
 	log("Syncing from mothership.")
 	
@@ -396,7 +461,6 @@ def pidLockFile(source):
 				cmd = procFile.read().split('\x00')
 			if len(cmd) >= 2:
 				if os.path.basename(cmd[0]) == 'python' and os.path.basename(cmd[1]) == os.path.basename(__file__):
-					print('Slideshow already in progress on PID ' + storedPid + '. Exiting')
 					log('Slideshow already in progress on PID ' + storedPid + '. Exiting.')
 					sys.exit(1)
 		os.remove(pidFileName)
@@ -475,20 +539,20 @@ def runSlideShow():
 			log("No files in " + gets('StoragePath'))
 			waitPage(screen, 'nofiles')
 		else:
-			fileName = getFilenameFromDB()
-			log('Displaying file: ' + fileName,1)
-			if os.path.splitext(fileName)[1].lower()[1:] not in gets('picExts').split(','):
-				log("skipping " + fileName + ". Not a picture.")
+			storageFilename = getFilenameFromDB()
+			log('Displaying file: ' + storageFilename,1)
+			if os.path.splitext(storageFilename)[1].lower()[1:] not in gets('picExts').split(','):
+				log("skipping " + storageFilename + ". Not a picture.")
 				continue
-			if not os.path.exists(fileName):
-				log('Database does not match storage Contents: File ' + fileName + ' does not exist on disk.  Please run verify on database contents.')
+			if not os.path.exists(storageFilename):
+				log('Database does not match storage Contents: File ' + storageFilename + ' does not exist on disk.  Please run verify on database contents.')
 
 			# Get the size appropriate for the new pictures for resizing
 			# Maintains aspect ratio.
-			newSize = getNewSize(fileName)
+			newSize = getNewSize(storageFilename)
 			log('newSize: ' + repr(newSize))
 
-			img = pygame.image.load(fileName).convert()
+			img = pygame.image.load(storageFilename).convert()
 			img = pygame.transform.scale(img, newSize)
 			images.append(img)
 
@@ -506,13 +570,13 @@ def resetBlacklist():
 
 def getFilenameFromDB():
 	cur = db.cursor()
-	cur.execute('SELECT local_path FROM files WHERE blacklisted != 1 ORDER BY RANDOM() LIMIT 1')
+	cur.execute('SELECT storage_filename FROM files WHERE blacklisted != 1 ORDER BY RANDOM() LIMIT 1')
 	results = cur.fetchall()
 	if not results:
-		fileName = ""
+		storageFilename = ""
 	else:
-		fileName = results[0][0]
-	return fileName
+		storageFilename = results[0][0]
+	return storageFilename
 
 def waitPage(screen, status):
 	pygame.font.init()
@@ -545,9 +609,9 @@ def checkEvents(fileName=None):
 				cleanUp()
 	return nextPic
 
-def blacklistPic(fileName):
-	log('in blacklistPic(' + fileName + ')',2)
-	db.cursor().execute('UPDATE files SET blacklisted = 1 WHERE local_path = (?)',(fileName,))
+def blacklistPic(storageFilename):
+	log('in blacklistPic(' + storageFilename + ')',2)
+	db.cursor().execute('UPDATE files SET blacklisted = 1 WHERE storage_filename = (?)',(storageFilename,))
 	db.commit()
 	return
 
@@ -667,12 +731,14 @@ def log(msg, debugLevel=0):
 
 def refreshFiles():
 	pidLockFile('refresh')
+	global times
 	times['refresh'] = time.time()
 	resolution = ""
 
-	log("Checking for new files.")
+	log('Checking for new files.')
 	getNewFiles()
 
+	log('Deleting removed files.')
 	deleteRemoved()
 
 	removeLock('refresh')
