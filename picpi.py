@@ -59,7 +59,7 @@ def main():
 	times['program start'] = time.time()
 
 	# Do our directories exist?
-	dirList = ('picpiDir','storagePath','inboundFilePath','tmpPath',)
+	dirList = ('picpiDir','storagePath','inboundpath','tmpPath',)
 	for dir in dirList:
 		if not os.path.isdir(gets(dir)):
 			log('Creating directory: ' + dir,3)
@@ -122,12 +122,12 @@ def set_config():
 	if tmp != '':
 		baseDir = tmp
 
-	inboundFilePath = baseDir + '/inbound'
+	inboundpath = baseDir + '/inbound'
 	print('********************************************************************************')
 	print('The Inbound File Path stores files as they are pulled from the remote location.\nThe default location is (' + baseDir + '/inbound' + ')\n')
 	tmp = raw_input('2)  What Inbound File Path would you like to use?  <Enter> for default: ')
 	if tmp != '':
-		inboundFilePath = tmp
+		inboundpath = tmp
 
 	storagePath = baseDir + '/storage'
 	print('********************************************************************************')
@@ -182,7 +182,7 @@ def set_config():
 		log('baseDir = ' + baseDir,2)
 		c.set('Main','picpiDir',baseDir + '/picpi')
 		c.set('Main','storagePath',baseDir + '/picpi/storage')
-		c.set('Main','inboundFilePath',baseDir + '/picpi/inbound')
+		c.set('Main','inboundpath',baseDir + '/picpi/inbound')
 		c.set('Main','tmpPath',baseDir + '/picpi/tmp')
 		c.set('Main','picExts',','.join(('jpg','jpeg','tif','tiff','gif','png','bmp')))
 		c.set('Main','vidExts',','.join(('wmv','mpg2','mpg4','mpg','mkv')))
@@ -258,18 +258,29 @@ def makePath(pathToCreate):
 	for x in range(len(pathToCreate.split('/'))):
 		path = '/'.join(pathToCreate.split('/')[0:x+1])
 
-		for dirName in ('storagePath', 'inboundFilePath',):
+		for dirName in ('storagePath', 'inboundpath',):
 			if not os.path.exists(gets(dirName) + '/' + path):
 				os.mkdir(gets(dirName) + '/' + path)
 	return
+
+def stripDoubleSlash(filename):
+	while '//' in filename:
+		filename = filename.replace('//','/')
+	return filename
 
 def processFile(db, remoteFilename):
 	log('in processFile(' + repr(db) + ',' + remoteFilename + ')',2)
 	ext = os.path.splitext(remoteFilename)[1][1:].lower()
 	fileBase = os.path.split(remoteFilename)[1]
-	inboundFilename = gets('inboundFilePath') + '/' + remoteFilename
+
+	inboundFilename = gets('inboundpath') + '/' + remoteFilename
+	inboundFilename = stripDoubleSlash(inboundFilename)
+
 	tmpName = gets('tmpPath') + "/" + os.path.split(remoteFilename)[1]
+	tmpName = stripDoubleSlash(tmpName)
+
 	storageFilename = gets('storagePath') + '/' + remoteFilename
+	storageFilename = stripDoubleSlash(storageFilename)
 	
 	makePath(os.path.split(remoteFilename)[0])
 
@@ -304,7 +315,7 @@ def dropboxWalk(client, path, fileList=[], dirList=[]):
 	data = client.metadata(path)
 	if data['is_dir']:
 		dirList.append(data['path'])
-		inboundDirname = gets('inboundFilePath') + '/' + path
+		inboundDirname = gets('inboundpath') + '/' + path
 		if not os.path.exists(inboundDirname):
 			log('Creating directory: ' + inboundDirname)
 			os.mkdir(inboundDirname)
@@ -320,14 +331,15 @@ def deleteRemoved():
 	times['deleteRemoved'] = time.time()
 	log('Checking for files no longer on remote side.')
 	client = dropbox.client.DropboxClient(gets('dropbox_access_token'))
-	for dir in os.walk(gets('inboundFilePath')):
+	for dir in os.walk(gets('inboundpath')):
 		for file in dir[2]:
 			inboundFilename = dir[0] + '/' + file
 			
+			log('Checking ' + inboundFilename)
 			remoteFilename = db.cursor().execute('SELECT remote_filename FROM files WHERE inbound_filename = (?)',(inboundFilename,)).fetchall()
 			if remoteFilename == []:
 				print("DANGER WILL ROBINSON!")
-			remote_filename = remoteFilename[0][0]
+			remoteFilename = remoteFilename[0][0]
 
 			log('Checking dropbox for: ' + remoteFilename,3)
 			try:
@@ -352,7 +364,7 @@ def deleteFile(storageFilename):
 def getDropboxFile(client, remoteFilename):
 	for file in os.listdir(gets('tmppath')):
 		os.remove(gets('tmppath') + '/' + file)
-	inboundFilename = gets('inboundFilePath') + '/' + remoteFilename
+	inboundFilename = gets('inboundpath') + '/' + remoteFilename
 	metadata = client.metadata(remoteFilename)
 
 	log('Database revision: ' + str(metadata['revision']) + ' - ' + str(getRevision(remoteFilename)) + ' :Dropbox revision',2)
@@ -375,9 +387,8 @@ def getDropboxFile(client, remoteFilename):
 
 		log("Speed: " + str(round(bps / 1024,2)) + ' MB/s',1)
 
-		storageFilename = gets('storagePath') + '/' + remoteFilename
 		processFile(db, remoteFilename)
-		storeFile(remoteFilename, metadata, storageFilename)
+		storeFile(remoteFilename, metadata)
 	else:
 		log('Skipping:    ' + remoteFilename + '. File already exists.')
 	return
@@ -398,21 +409,26 @@ def wipeAll():
 			log("DB file deleted: " + dbFile)
 		else:
 			log("Unable to delete DB file: " + dbFile)
-	for dir in ('inboundFilePath', 'storagePath', 'tmpPath',):
+	for dir in ('inboundpath', 'storagePath', 'tmpPath',):
 		if os.path.isdir(gets(dir)):
 			shutil.rmtree(gets(dir),ignore_errors=True)
 			log("Directory deleted: " + gets(dir))
 	return
 
-def storeFile(remoteFilename, metadata, storageFilename):
+def storeFile(remoteFilename, metadata):
+	storageFilename = gets('storagepath') + '/' + remoteFilename
+	storageFilename = storageFilename.replace('//','/')
+	inboundFilename = gets('inboundpath') + '/' + remoteFilename
+	inboundFilename = inboundFilename.replace('//','/')
+
 	cur = db.cursor()
-	cur.execute('INSERT INTO files VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (remoteFilename, gets('inboundFilePath') + '/' + remoteFilename, gets('storagePath') + '/' + remoteFilename ,metadata['revision'], metadata['bytes'], stamp(), metadata['client_mtime'].replace('+0000',''), 0))
+	cur.execute('INSERT INTO files VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (remoteFilename, inboundFilename, storageFilename ,metadata['revision'], metadata['bytes'], stamp(), metadata['client_mtime'].replace('+0000',''), 0))
 	db.commit()
 	return
 
 def storeDir(remote_dir, metadata):
 	cur = db.cursor()
-	cur.execute('INSERT INTO directories VALUES (?, ?, ?, ?, ?)', (remote_dir, gets('inboundFilePath') + '/' + remote_dir, gets('storagePath') + '/' + remote_dir, metadata['hash'], stamp()))
+	cur.execute('INSERT INTO directories VALUES (?, ?, ?, ?, ?)', (remote_dir, gets('inboundpath') + '/' + remote_dir, gets('storagePath') + '/' + remote_dir, metadata['hash'], stamp()))
 	db.commit()
 	return
 
