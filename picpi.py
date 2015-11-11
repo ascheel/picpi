@@ -537,9 +537,9 @@ def runSlideShow():
 	fileName = ''
 	firstIteration = True
 	global images
-	nextPic = False
 	images = []
 	while 1:
+		transitionDuration = 10
 		log('Beginning slideshow loop.',2)
 		if firstIteration == False:
 			log('Waiting.',3)
@@ -547,6 +547,7 @@ def runSlideShow():
 				pygame.time.wait(250)
 				nextPic = checkEvents(fileName)
 				if nextPic:
+					transitionDuration = 3
 					log('Next pic.')
 					break
 		firstIteration = False
@@ -572,7 +573,9 @@ def runSlideShow():
 			img = pygame.transform.scale(img, newSize)
 			images.append(img)
 
-			transition(screen, 'fade',images,nextPic)
+			log('Starting transition')
+			transition(screen, 'fade',images,transitionDuration)
+			log('Completing transition')
 			if len(images) == 2:
 				del images[0]
 	return
@@ -631,23 +634,25 @@ def blacklistPic(storageFilename):
 	db.commit()
 	return
 
-def transition(screen,transType,images,manualAdvance=False):
+def transition(screen,transType,images,transitionDuration=5):
 	if transType == 'fade':
 		MAX_ALPHA = 255
 		MIN_ALPHA = 1
-		ALPHA_STEP = 5
-		FRAME_DURATION = 0
-		if manualAdvance:
-			ALPHA_STEP = 25
-			FRAME_DURATION = 0
-		BLACK = (0,0,0)
+		start = pygame.time.get_ticks()
 		if len(images) == 2:
 			img2, img1 = images
-			for a in range(MIN_ALPHA,MAX_ALPHA,ALPHA_STEP):
-				pygame.time.wait(FRAME_DURATION)
-				screen.fill(BLACK)
-				img1.set_alpha(a)
-				img2.set_alpha(MAX_ALPHA-a)
+			while True:
+				checkEvents()
+				now = pygame.time.get_ticks()
+				if ((now - start)/1000) > transitionDuration:
+					break
+				screen.fill(pygame.Color(0,0,0))
+				#alpha = int(round((start + now) / (start + FRAME_DURATION)) * 255)
+				alpha = MIN_ALPHA
+				if now - start > 0:
+					alpha = MAX_ALPHA / ((transitionDuration * 1000) / (now - start))
+				img1.set_alpha(alpha)
+				img2.set_alpha(MAX_ALPHA-alpha)
 				screen.blit(img1,tl(img1))
 				screen.blit(img2,tl(img2))
 				pygame.display.update()
@@ -656,30 +661,6 @@ def transition(screen,transType,images,manualAdvance=False):
 			screen.fill((0,0,0))
 			screen.blit(img,tl(img))
 			pygame.display.update()
-	if transType == 'vert_wipe':
-		# Yeah...  this is broken.
-		img = images[0]
-		size = img.get_size()
-		num_fade_rows=16
-		offset=0
-		background_color=(0,0,0)
-		fade_factor = int(256/num_fade_rows)
-		for i in range(0,(size[1]+num_fade_rows)):
-			arr = pygame.surfarray.pixels_alpha(img)
-			offset += 1
-			for i in range(0,num_fade_rows):
-				if((offset - i) < 0):
-					continue
-				else:
-					for j in range(0, (size[0]-1)):
-						if (arr[j][offset-i] <= fade_factor):
-							arr[j][offset-i]=0
-						else:
-							arr[j][offset-i] -= fade_factor
-			del arr
-			display_surface.fill(background_color)
-			display_surface.blit(image_surface, (0,64))
-			pygame.display.flip()
 	return
 
 def tl(img):
