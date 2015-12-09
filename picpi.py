@@ -539,7 +539,7 @@ def runSlideShow():
 	global images
 	images = []
 	while 1:
-		transitionDuration = 10
+		transitionDuration = int(gets('transition_duration'))
 		log('Beginning slideshow loop.',2)
 		if firstIteration == False:
 			log('Waiting.',3)
@@ -575,7 +575,7 @@ def runSlideShow():
 
 			log('Starting transition')
 			transition(screen, 'fade',images,transitionDuration)
-			log('Completing transition')
+			log('Completing transition',1)
 			if len(images) == 2:
 				del images[0]
 	return
@@ -635,27 +635,46 @@ def blacklistPic(storageFilename):
 	return
 
 def transition(screen,transType,images,transitionDuration=5):
+	log('in transition')
 	if transType == 'fade':
 		MAX_ALPHA = 255
 		MIN_ALPHA = 1
 		start = pygame.time.get_ticks()
+		log('Starting ticks: ' + str(start),3)
+		log('images: ' + repr(images))
 		if len(images) == 2:
 			img2, img1 = images
 			while True:
+				log('Checking events.',3)
 				checkEvents()
+				log('Events checked.',3)
 				now = pygame.time.get_ticks()
+				log('Now ticks: ' + str(now),3)
 				if ((now - start)/1000) > transitionDuration:
+					log('Breaking because it\'s past duration.',1)
 					break
+				log('Setting black backgound fill.',3)
 				screen.fill(pygame.Color(0,0,0))
 				#alpha = int(round((start + now) / (start + FRAME_DURATION)) * 255)
 				alpha = MIN_ALPHA
 				if now - start > 0:
-					alpha = MAX_ALPHA / ((transitionDuration * 1000) / (now - start))
+					log('now - start = ' + repr(now - start),3)
+					log('MAX_ALPHA: ' + repr(MAX_ALPHA),3)
+					log('transitionDuration: ' + repr(transitionDuration),3)
+					log('transitionDuration * 1000: ' + repr(transitionDuration * 1000),3)
+					alpha = int(MAX_ALPHA / ((transitionDuration * 1000) / (now - start)))
+					log('New alpha set: ' + str(alpha),2)
+				log('Setting alpha for img1: ' + str(alpha),3)
 				img1.set_alpha(alpha)
+				log('Setting alpha for img2: ' + str(MAX_ALPHA-alpha),3)
 				img2.set_alpha(MAX_ALPHA-alpha)
+				log('Blit1',3)
 				screen.blit(img1,tl(img1))
+				log('Blit2',3)
 				screen.blit(img2,tl(img2))
+				log('Screen update',3)
 				pygame.display.update()
+				log('Completed transition.',2)
 		else:
 			img=images[0]
 			screen.fill((0,0,0))
